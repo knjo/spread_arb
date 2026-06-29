@@ -1,0 +1,28 @@
+# ── 產物（所有資料輸出，不進 git）──
+out/                    # events CSV、peek/、stats/ 全部回測與分析產物
+*.csv
+*.parquet
+*.png
+*.html                  # 報告儀表板等產物
+*.md                    # 報告/文件不進 git
+
+# ── 機密 ──
+.env                    # MySQL / SDK 帳密
+*.env
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ── 編輯器 / OS ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
