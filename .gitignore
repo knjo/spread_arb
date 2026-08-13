@@ -9,6 +9,11 @@ out/                    # events CSV、peek/、stats/ 全部回測與分析產�
 !taker/METHODOLOGY.md
 !taker/RESEARCH_DIRECTIONS.md
 !taker/出場分析報告.md
+!maker/README.md
+maker/data/**
+!maker/data/README.md
+!maker/doc/**/*.md
+!maker/src/**/*.md
 
 # ── 機密 ──
 .env                    # MySQL / SDK 帳密

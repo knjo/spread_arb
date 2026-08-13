@@ -444,6 +444,8 @@ uv run python report_first.py --ticks --mode 2 -s 20260201 -e 20260228   # 限�
 
 ## 步驟 11｜maker 研究規劃（下一階段，尚未實作）
 
+> 2026-08-12 更新：本節保留早期「maker 輔助既有 taker 出場」的歷史規劃。新的 maker 線已改成獨立的「日內 basis fair-value／發散回歸／雙路 maker 加 taker hedge」研究，完整規格見 [`../maker/`](../maker/README.md)，兩者不可混為同一策略。
+
 ### 為什麼要研究 maker
 
 taker-taker 進出各吃一個雙邊價差（≈1.17%），薄價差(0.5%/1%)做不起來。但**高頻實務常做 0.5%
