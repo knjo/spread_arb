@@ -4,7 +4,7 @@
 
 ## 目的
 
-本研究回答的是：不同商品的 tick、spread 與 basis 波動不同時，如何用前一交易日已知資料，替下一交易日產生可比較的 entry width 候選。
+本研究回答的是：不同商品的 tick、spread 與 basis 波動不同時，如何用前一交易日已知資料建立 diagnostic width grid，並驗證商品自適應 boundary prior 的可行性。
 
 策略方向固定為先賣 basis。令：
 
@@ -48,21 +48,21 @@ D−1 excursion p80 對 D 日實現 p80：
 
 | 指標 | 正向 excursion | 負向 excursion |
 |---|---:|---:|
-| 31 pairs 的 prior/current correlation | 0.839 | 0.862 |
+| 31-row diagnostic table 的 prior/current correlation | 0.839 | 0.862 |
 | 隔日 p80 median absolute error | 2.15 BP | 1.80 BP |
 | D / D−1 p80 median ratio | 0.944 | — |
 
-上表是全部 31 組 diagnostic。嚴格套用 prior gate 後剩 27 組，正向 correlation 為 `0.836`、median absolute error 為 `2.34 BP`、D／D−1 median ratio 為 `0.901`，主結論沒有改變。
+上表有 31 rows；其中一組 prior 全為 null，所以 correlation／error 的有效 N 為 30。嚴格套用 prior gate 後剩 27 組，正向 correlation 為 `0.836`、median absolute error 為 `2.34 BP`、D／D−1 median ratio 為 `0.901`，主結論沒有改變。
 
 所以 D−1 的正常發散幅度可作 D 日 prior candidate。這仍只是八日 pilot；商品別只有 7–8 點，2317 的正向相關為 `-0.045`，不可宣稱每個商品都已穩定。
 
 若 prior p80 校準正確，下一日完整 excursion 超過它的比例理論上接近 20%，不是 80%。目前 pair-median 為 `16.94%`。
 
-參數 promotion gate 暫定：D−1 `eligible rate >= 80%` 且完成的正向 excursions 至少 30 段。31 pairs 中 27 組通過；2303 僅 4／8 組通過，正式策略需要 pooled／hierarchical fallback。
+參數 promotion gate 暫定：D−1 `eligible rate >= 80%`，且正、負向 completed excursions 各至少 30 段。31 pairs 中 27 組通過；2303 僅 4／8 組通過，正式策略需要 pooled／hierarchical fallback。
 
-## Width 候選表
+## Diagnostic width grid
 
-本版同時計算：
+本版同時計算下列診斷格點；它們不會直接進 production optimizer：
 
 ```text
 fixed:          10 / 20 / 30 / 40 BP
@@ -71,7 +71,7 @@ prior TTBand:   0.25 / 0.50 / 0.75 × D−1 median TTBand
 prior excursion D−1 positive p50 / p80 / p95
 ```
 
-部分重點如下。`Potential entries/day` 是每個 pair-day 的中位 first-crossing 次數；不是 fill 次數。Primary path label從 trigger 30 秒後才開始搜尋，以降低 signal 當下 `B_t` 的機械回歸影響。
+部分重點如下。`Potential entries/day` 是每個 pair-day 的中位 first-crossing 次數；不是 fill 次數。主診斷 path label 從 trigger 30 秒後才開始搜尋，以降低 signal 當下 `B_t` 的機械回歸影響。
 
 | Width policy | Median width BP | Median future ticks | Potential entries/day | 60s 回中心 path hit | 300s 回中心 path hit |
 |---|---:|---:|---:|---:|---:|
@@ -85,7 +85,7 @@ prior excursion D−1 positive p50 / p80 / p95
 
 後兩列的 hit rate 不能解讀成比較好：30／40 BP 分別只有 15／9 個 pair-day 出現潛在 entry；能完整觀察到 300 秒的分母分別為 15 pairs／131 events 與 8 pairs／22 events。正式比較必須同時看 reach frequency、censor、fill 與持有時間。
 
-`symmetric path hit` 目前只是行情路徑診斷；它可能跨越下一個正向 excursion，尚未用部位 FSM 去除 cycle overlap，因此不能拿來估完整日內週轉。
+本表的 `symmetric path hit` 仍只是會重疊的行情路徑診斷；不可拿來估完整日內週轉。後續已在 [CYCLE.md](CYCLE.md) 以獨立 position FSM 重建非重疊 latent cycles，沒有沿用這個 label。
 
 ## Nominal width 不等於實際掛價
 
@@ -107,10 +107,10 @@ Geometry quantile 是所有 `analysis_eligible` 狀態的描述，另以欄位�
 - 潛在 crossing 是否真的在 maker quote 移動／gate 前成交。
 - 成交量、queue ahead、partial fill、cancel race。
 - Fill 後 50 ms taker VWAP 與 adverse selection。
-- Center、half-capture、symmetric exit 的完整非重疊 position cycles。
-- 費稅、當沖減半、資金占用與每日 EV。
+- Maker fill 後 center、halfway-to-symmetric、symmetric exit 的 executable position cycles。
+- 逐腿實際成交現金流、券商費用、依法匹配的現股當沖證交稅、期貨逐次交易稅、資金／庫存成本與 OOS PnL。
 
-這些依序由 WP02、WP03、WP04 完成。本表目前用於選擇值得重播的 widths，而不是直接發布 production width。
+固定 BP／tick rows 只用來確認回歸曲線與 rounded geometry，不形成 WP02 shortlist。正式商品上下界與機率表見 [ADAPTIVE_BOUNDS.md](ADAPTIVE_BOUNDS.md)；maker fill、hedge 與 executable cycle 仍依序由 WP02、WP03、WP04 完成。
 
 ## Censor 與統計限制
 

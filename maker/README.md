@@ -12,4 +12,6 @@
 
 跨商品的掛單寬度 pilot 已拆到 [`doc/quote_width/RESULTS.md`](doc/quote_width/RESULTS.md)：用 D−1 的 tick／spread／TTBand 與 non-overlap basis excursions 建立 D 日參數表，並明確與 maker fill、50 ms hedge 及完整 EV 分離。
 
+固定格點的 latent FSM 見 [`doc/quote_width/CYCLE.md`](doc/quote_width/CYCLE.md)，其中 10／15／20／30 BP 與固定 tick 都只作 sensitivity。正式研究入口改為 [`doc/quote_width/ADAPTIVE_BOUNDS.md`](doc/quote_width/ADAPTIVE_BOUNDS.md) 的 D−1 商品別非對稱界線；WP02 再依當下 fair、反腿行情與合法 ladder 產生 rounded action。
+
 既有 `../taker/` 是獨立的 taker 研究線；可重用契約 mapping 與清洗邏輯，但 maker 的取樣、queue 與逐事件撮合另行實作。

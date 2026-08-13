@@ -4,8 +4,10 @@
 |---|---|---|---|---|
 | 00 | Data contract 與 hard gates | 無 | schema、quality funnel、tests | WP01 所需部分已實作並測試 |
 | 01 | Stable fair-mid basis | WP00 | landmarks、metrics、結果文件 | Provisional candidate；validation 未完成 |
-| 01B | Cross-product quote width table | WP01 | D−1 parameters、excursions、next-day validation | 八日／四商品 latent-path pilot 完成；非 fill／EV |
-| 02 | Quote episode 與 maker fill | WP00、WP01 | competing-risk labels | 未開始 |
+| 01B | Cross-product diagnostic grids | WP01 | D−1 parameters、excursions、next-day validation | 八日／四商品 latent-path pilot 完成；固定 BP／tick 不進 optimizer |
+| 01C | Fixed-grid latent cycles | WP01B | non-overlap FSM、center／lower sensitivity | 八日／四商品 diagnostic 完成；非 execution shortlist |
+| 01D | Adaptive asymmetric boundaries | WP01B、WP01C | D−1 safe snapshot、upper/lower reach 與 conditional reversion | 八日／四商品 latent pilot 完成；非 fill／EV |
+| 02 | Quote episode 與 maker fill | WP00、WP01、WP01D | SpreadPair epoch、layered rounded-target orders、competing-risk labels | 取樣／撤單契約已凍結；raw replay 未開始 |
 | 03 | 固定 50 ms hedge | WP00、WP02 | route cost labels | 未開始 |
 | 04 | Action EV 與完整 cycle | WP01–03 | calibrated policy frontier | 未開始 |
 | 05 | Portfolio replay | WP04 | OOS turnover／PnL／risk | 未開始 |

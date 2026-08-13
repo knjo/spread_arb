@@ -37,3 +37,5 @@ latency_plus_depth
 - Hedge complete、掃過檔數、stale book、IOC partial、retry 與 emergency outcome。
 - 10 ms、100 ms、1 s、5 s markout。
 - 30／100 ms 僅作 sensitivity；正式基準固定 50 ms。
+
+這裡的 50 ms slippage 只量價格、深度與延遲成本，不含券商手續費或交易稅；WP04 依實際成交價格與數量統一入帳一次，避免重複扣費。

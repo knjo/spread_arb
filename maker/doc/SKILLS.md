@@ -6,8 +6,8 @@
 |---|---|---|
 | `data_contract` | 時間、價格、合約、RefPrice／TrialMatch gate | 模型挑選 |
 | `fair_mid` | Stable anchor、predictive fair、uncertainty、churn | Maker fill 假設 |
-| `quote_episode` | Action signature、取樣、competing risks | 50 ms hedge 成本 |
-| `queue_replay` | Spot／future MBP fill bounds | 宣稱精確 MBO queue |
+| `quote_episode` | SpreadPair epoch、多層 order reconciliation、同價去重、competing risks | 50 ms hedge 成本 |
+| `queue_replay` | Spot／future MBP fill bounds、共同成交量分配、撤單 shadow path | 宣稱精確 MBO queue |
 | `hedge_50ms` | L1–L5 VWAP、partial、retry、slippage | Fair 預測 |
 | `portfolio_replay` | 部位、reservation、費稅、週轉 | 修改上游 labels |
 | `validation` | Walk-forward、calibration、block bootstrap、leakage audit | 事後挑最佳期間 |

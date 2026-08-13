@@ -584,11 +584,20 @@ def build_daily_product_parameters(
     return parameters, validation, target_excursions
 
 
-def _candidate_widths(parameters: pl.DataFrame) -> pl.DataFrame:
+def build_width_candidates(
+    parameters: pl.DataFrame,
+    fixed_widths_bp: Iterable[float] = DEFAULT_FIXED_WIDTHS_BP,
+) -> pl.DataFrame:
+    """Expand D-1 parameters into leakage-safe latent diagnostic candidates."""
     base = parameters.select(
         "Date",
         "ValueCode",
         "QuoteCode",
+        "prior_date",
+        "calendar_gap_days",
+        "target_dte_days",
+        "target_tick_bp_bucket",
+        "prior_future_spread_bucket",
         "target_ref_future_ask_tick_bp",
         "target_ref_spot_bid_tick_bp",
         "prior_tt_band_width_bp_p50",
@@ -598,7 +607,7 @@ def _candidate_widths(parameters: pl.DataFrame) -> pl.DataFrame:
         "prior_parameter_valid",
     )
     frames: list[pl.DataFrame] = []
-    for width in DEFAULT_FIXED_WIDTHS_BP:
+    for width in fixed_widths_bp:
         frames.append(
             base.with_columns(
                 pl.lit(f"fixed_{int(width)}bp").alias("width_policy"),
@@ -1248,7 +1257,7 @@ def run_width_study(
     parameters, validation, target_excursions = build_daily_product_parameters(
         target_panel, prior_panel, mapping
     )
-    candidates = _candidate_widths(parameters)
+    candidates = build_width_candidates(parameters)
     events = build_potential_entry_events(target_panel, candidates)
     policy_table = _width_policy_table(candidates, target_excursions, events)
     validation_summary = _validation_summary(validation)
@@ -1269,6 +1278,10 @@ def run_width_study(
         "anchor_column": ANCHOR_COLUMN,
         "fixed_widths_bp": list(DEFAULT_FIXED_WIDTHS_BP),
         "tick_multipliers": list(DEFAULT_TICK_MULTIPLIERS),
+        "fixed_bp_role": "diagnostic_only; not a production action shortlist",
+        "tick_grid_role": "diagnostic_only; not a production action shortlist",
+        "actionable_execution": False,
+        "ev_ready": False,
         "tt_band_multipliers": list(DEFAULT_TT_BAND_MULTIPLIERS),
         "horizons_seconds": list(DEFAULT_HORIZONS_SECONDS),
         "observation_gap_seconds": OBSERVATION_GAP_SECONDS,

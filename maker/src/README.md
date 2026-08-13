@@ -6,7 +6,7 @@
 src/
 ├── common/       # data contract、時間、價格與合約 mapping
 ├── fair_mid/     # WP01 anchor、labels、metrics、tick-rounded churn
-├── quote_width/  # D−1 結構參數、non-overlap excursion 與 width table
+├── quote_width/  # D−1 結構參數、diagnostic grids、adaptive bounds 與 latent cycles
 ├── quote_fill/   # WP02 episodes 與 queue replay
 ├── hedge_50ms/   # WP03 book walk 與 slippage
 └── backtest/     # WP04–05 policy 與 portfolio replay
@@ -38,6 +38,12 @@ uv run --project /home/kevin/Project/HFT --no-sync \
 
 uv run --project /home/kevin/Project/HFT --no-sync \
   python -m maker.src.quote_width.table
+
+uv run --project /home/kevin/Project/HFT --no-sync \
+  python -m maker.src.quote_width.cycle
+
+uv run --project /home/kevin/Project/HFT --no-sync \
+  python -m maker.src.quote_width.adaptive
 ```
 
 程式使用 Polars，資料與模型邏輯需模組化；禁止在 feature、取樣、label、normalization 或 validation 中使用未來資訊。

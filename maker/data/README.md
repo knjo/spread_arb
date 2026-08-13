@@ -40,3 +40,6 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `fair_mid/prior_day/` | 昨日同一目標合約 landmarks、prior summary、seeded anchor 與 paired metrics |
 | `fair_mid/level_stability/` | Absolute level、block-relative level、fast／slow gap 與方向診斷 |
 | `quote_width/` | D−1 商品參數、non-overlap excursion、width candidates、隔日驗證與 entry quote geometry |
+| `quote_width/cycle/` | 固定格點的獨立 latent position FSM 與 diagnostic summaries |
+| `quote_width/adaptive/` | D−1 safe parameter snapshot，以及分開標示的 retrospective reach／reversion validation |
+| `quote_fill/` | SpreadPair epoch、candidate intents、physical orders、state spells、partial fills與撤單／queue replay diagnostics |

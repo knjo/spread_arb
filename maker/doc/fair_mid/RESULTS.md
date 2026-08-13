@@ -19,7 +19,7 @@ M_t = 120 秒 half-life 的 causal EWMA(B_mid)
 - 經 tick rounding 且排除超出 RefPrice 價格帶的 target 後，fair 單獨造成的 entry 改價由約 1.41 次／分鐘降至 0.080 次／分鐘，約少 94%。
 - 原始 residual 圖形顯示大致回歸，但它和 outcome 共用 noisy `B_t`；移除這個機械效果後，策略關心的正 residual 在 fresh 樣本只有弱訊號。
 
-因此可以並行進入 WP02 建立 fill／requote／50 ms hedge labels，但 `EWMA120` 仍只是 reference candidate。固定 20 bp width、production policy、以及 residual-based aggressiveness 都尚未核准。
+因此可以並行進入 WP02 建立 fill／requote labels，再交由 WP03 建立 50 ms hedge labels；但 `EWMA120` 仍只是 reference candidate。固定 20 bp width、production policy、以及 residual-based aggressiveness 都尚未核准。
 
 ## Pilot 範圍
 
@@ -146,7 +146,7 @@ anchor_error_regime
 book_age / leg_skew / TrialMatch / RefPrice eligibility
 ```
 
-研究 width 時保留 `10／20／30／40 bp` 與 uncertainty-conditioned 版本；相同 rounded target 共用 raw first-fill fact，再以各 policy 的 `tau_move` 判定 fill-before-move。
+`10／20／30／40 bp` 只保留為 churn／回歸 diagnostic controls，不提供 production-facing width。正式 nominal upper／lower 由 D−1 adaptive snapshot 產生；相同 rounded target 共用 raw first-fill fact，再以各 policy 的 `tau_move` 判定 fill-before-move。
 
 ## 可重跑產物
 

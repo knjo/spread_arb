@@ -15,7 +15,7 @@ from .anchors import ANCHOR_COLUMNS, GROUP_KEYS
 from .metrics import MODEL_NAMES
 
 
-DEFAULT_OPEN_WIDTH_BP = 20.0
+DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP = 20.0
 PRICE_EPS = 1e-10
 
 
@@ -178,7 +178,7 @@ def _aggregations() -> list[pl.Expr]:
 
 def summarize_quote_churn(
     panel: pl.DataFrame,
-    open_width_bp: float = DEFAULT_OPEN_WIDTH_BP,
+    open_width_bp: float = DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP,
 ) -> QuoteChurnResult:
     """Measure route target changes caused by the anchor after tick rounding."""
     required = {

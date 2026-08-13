@@ -16,7 +16,10 @@ from .metrics import (
     summarize_fair_panel,
     summarize_fresh_endpoint_reversion,
 )
-from .quote_churn import DEFAULT_OPEN_WIDTH_BP, summarize_quote_churn
+from .quote_churn import (
+    DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP,
+    summarize_quote_churn,
+)
 
 
 DEFAULT_SYMBOLS = ("2303", "2317", "2603", "2881")
@@ -47,7 +50,12 @@ def parse_args() -> argparse.Namespace:
         help="optional hard age gate for anchor input; default uses every valid formal book",
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--open-width-bp", type=float, default=DEFAULT_OPEN_WIDTH_BP)
+    parser.add_argument(
+        "--open-width-bp",
+        type=float,
+        default=DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP,
+        help="diagnostic quote-churn benchmark; not a production width",
+    )
     return parser.parse_args()
 
 
@@ -57,7 +65,7 @@ def run_pilot(
     interval: str,
     primary_age_ms: int | None,
     output_dir: Path,
-    open_width_bp: float = DEFAULT_OPEN_WIDTH_BP,
+    open_width_bp: float = DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP,
 ) -> pl.DataFrame:
     if interval != "1s":
         raise ValueError("WP01 forward labels currently require interval='1s'")
@@ -141,6 +149,7 @@ def run_pilot(
         "interval": interval,
         "primary_age_ms": primary_age_ms,
         "open_width_bp": open_width_bp,
+        "open_width_role": "diagnostic_churn_benchmark",
         "endpoint_diagnostic_seconds": 300,
         "delayed_reversion_start_seconds": 30,
         "delayed_reversion_end_seconds": 300,
