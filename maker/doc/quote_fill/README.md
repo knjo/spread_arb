@@ -20,7 +20,7 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md](DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md) | 端到端現況與精度邊界總結 | **現行結論** |
 | [MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md](MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md) | 五日 BID1–2 vs BID3–5 exact fill 與 hedge slip | 「只掛 A/B1–2」決策證據 |
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
-| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 checklist | **待重新討論** |
+| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **已定案；S0 待執行** |
 
 ## Archive（固定 45 檔、有 universe leakage）
 

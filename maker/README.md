@@ -23,6 +23,6 @@ approximate makerFill → +50 ms 期貨 hedge → 同日／跨日／到期 termi
 已凍結的決策：中價用 causal EWMA120；上下緣用 60-session rolling、正負側分開的 empirical quantile；取樣用
 SpreadPairTotalCount epoch 與 1 Hz final-net；只掛 A/B1–2；hedge 基準 `fill RecvTime + 50 ms`。
 
-下一步的研究範圍待重新討論；對照原始規格的缺口與草案在 [`doc/REWORK_PLAN_20260824.md`](doc/REWORK_PLAN_20260824.md)。
+下一步依已定案的 [`doc/REWORK_PLAN_20260824.md`](doc/REWORK_PLAN_20260824.md) 執行；順序由 S0 的 8 月歸因開始，再跑七組 policy、反向 entry route、exit maker、close policy 與最終 exact 校準。
 
 既有 `../taker/` 是獨立的 taker 研究線，本目錄不依賴它。
