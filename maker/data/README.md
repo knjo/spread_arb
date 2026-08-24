@@ -85,3 +85,7 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `monthly_product_selector_causal_v2_20260822/` | 因果商品池 manifest（72 日、3,886 product-days） |
 | `order_message_load_causal_v2_20260822_v2/`、`one_second_makerfill_causal_v2_20260822_v1/`、`dynamic_future_hedge_causal_v1_20260822/`、`dynamic_expiry_paired_close_facts_20260822_v1/`、`dynamic_estimated_path_portfolio_causal_v1_20260822/`、`august_exit_extension_causal_v1_20260822/` | 8/22 因果線 q95 輸出；互為 hard-coded 輸入 |
 | `makerfill_rank_l1_l5_sample_20260820_v5/`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1/` | 「只掛 A/B1–2」決策的五日證據 |
+| `august_attribution_s0_20260824_v2/` | S0 canonical q95 quote-only歸因；`cap=∞`、非20M策略回放 |
+| `august_attribution_s0_30_session_challenger_20260824_v1/` | S0 30-session market-only sensitivity；無scheduler／queue／makerFill且不進shortlist |
+
+`august_attribution_s0_20260824_v1/` 有 explicit L1 clear scalar forward-fill 錯誤，已由 v2 supersede，不得引用。

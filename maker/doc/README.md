@@ -19,7 +19,8 @@
 | [WALK_FORWARD.md](WALK_FORWARD.md) | 60-session 日更、fine-tune／holdout 切分 | 契約已定義 |
 | [quote_fill/README.md](quote_fill/README.md) | 因果 pipeline 各段結果索引 | **現行主線入口** |
 | [SKILLS.md](SKILLS.md)、[ASSIGNMENTS.md](ASSIGNMENTS.md) | 能力邊界、work packages | 後續依 S0–S5 實作同步更新 |
-| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **已定案；S0 待執行** |
+| [quote_fill/AUGUST_ATTRIBUTION_20260824.md](quote_fill/AUGUST_ATTRIBUTION_20260824.md) | S0：8 月 q95 market／boundary vs queue 歸因 | **完成；兩者並列** |
+| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0 完成；S1 下一步** |
 
 文件規則：
 

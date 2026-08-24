@@ -20,7 +20,8 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md](DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md) | 端到端現況與精度邊界總結 | **現行結論** |
 | [MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md](MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md) | 五日 BID1–2 vs BID3–5 exact fill 與 hedge slip | 「只掛 A/B1–2」決策證據 |
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
-| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **已定案；S0 待執行** |
+| [AUGUST_ATTRIBUTION_20260824.md](AUGUST_ATTRIBUTION_20260824.md) | S0 q95 raw-excursion touch vs post-touch queue 歸因、30-session sensitivity | **完成；兩者並列** |
+| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0 完成；S1 下一步** |
 
 ## Archive（固定 45 檔、有 universe leakage）
 
@@ -30,6 +31,7 @@ prequential challenger、cost/cap sweep、aggressive 13:00、compact evaluator�
 
 ## 資料
 
-`maker/data/walkforward/` 現在只剩基礎事實（`daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、
-`exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1`）、因果 manifest、8/22 六個 causal 輸出，
-以及兩個 L1–L5 診斷 bundle。
+`maker/data/walkforward/` 的現行層包含基礎事實（`daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、
+`exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1`）、因果 manifest、8/22 六個 causal 輸出、
+兩個 L1–L5 診斷 bundle，以及 S0 canonical／30-session sensitivity bundle。S0 舊 v1 有 explicit L1 clear
+forward-fill 錯誤，僅 v2 可引用；詳細 hash 與重跑方式見上述 S0 文件。

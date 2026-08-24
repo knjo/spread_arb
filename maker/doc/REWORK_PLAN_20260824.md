@@ -4,7 +4,7 @@
 
 決策基線：nested repo commit `0c3e5ad`
 
-狀態：**A1–D10 與 C9／B5／B6 口徑已定案，可由 S0 開始執行**。完成一項就在本文件打勾並填結果與 bundle 連結。
+狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0 已完成，下一步為 S1**。完成一項就在本文件打勾並填結果與 bundle 連結。
 
 ## 研究定位（使用者定義）
 
@@ -149,16 +149,18 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 
 ### S0　8 月惡化歸因（先做，預估一天）
 
-- [ ] 先落地 q95-only quote scheduler／working-order adapter，產生 actual new／cancel cursor；S0與既有 q95結果對帳，S1直接重用其 scheduler core並擴成含 C9／B6／terminal回饋的七組完整 event loop，不得另寫第二套 scheduler。S0這一版明標 `diagnostic_quote_only=true`，未完成前不能以 nominal clock發布 attribution，也不得冒充20M strategy replay。
-- [ ] 分母分開凍結：market excursion／touch panel用完整 matched-manifest product-days；queue attribution用同一 q95 intent stream的 `cap=∞` quote-only actual-working orders。S0不發布循環依賴下游terminal的20M sensitivity；待 S1 canonical q95 20M bundle完成後回填 robustness panel，且不因此改七組 grid或S1 shortlist規則。
-- [ ] 新增可重跑 attribution runner。`residual_excursion_bp = basis_mid_bp − anchor_ewma_120s_bp`；primary latent event 是 residual 從 `<= 0` 穿到 `> 0` 開始、到下一個 `<= 0` 結束的正向 excursion，touch cursor 是該 excursion 第一次從 `< D-1 q95 upper` 穿到 `>= upper` 的 raw event。SpreadPair episode只在 touch 後映射 live order，不能拿 order episode 或 compact excursion 的粗時間區間代替 market first-touch cursor。
-- [ ] 若 product-session 第一個 eligible raw state 已 `> 0`，該 excursion 標 `left_censored=true`；即使起點已在 upper 上方也不得臆造 first touch。Primary excursion 次數／幅度／touch rate排除它，另列 left-censored count、起點已達 upper count與納入 sensitivity後的結果。
-- [ ] 逐月分開報 residual excursion p50／p80／p95、D-1 q95 boundary p50／p80／p95、每 product-day observable excursion 數、touches／product-day、至少一次 touch 的 product-day 比例。
-- [ ] First-touch cursor只映射到當時仍在 working 的 `raw_order_fact_id`：`actual_new_send < touch <= active_end`，其中 `active_end` 是 actual cancel send或session expiry，且 `approximate_fill_cursor` 必須為 null或嚴格晚於 touch。`post_touch_fill_rate = approximate_fill_cursor ∈ (touch, active_end] 的 orders / outcome-supported touched raw_order_facts`；另列 BID1／BID2、pooled count 與 product-day 等權值。Nominal submit／stop只作 audit。
-- [ ] 用 decomposition 明確回答：touch rate 掉是市場／boundary 問題，post-touch fill 掉是 queue／競爭問題，兩者都掉就兩者並列。
-- [ ] 若 boundary lag 可疑，只加 30-session challenger sensitivity；不加入 S1 七組 primary shortlist，除非另改本計畫。
+- [x] 先落地 q95-only quote scheduler／working-order adapter，產生 actual new／cancel cursor；S0與既有 q95結果對帳，S1直接重用其 scheduler core並擴成含 C9／B6／terminal回饋的七組完整 event loop，不得另寫第二套 scheduler。S0這一版明標 `diagnostic_quote_only=true`，未完成前不能以 nominal clock發布 attribution，也不得冒充20M strategy replay。
+- [x] 分母分開凍結：market excursion／touch panel用完整 matched-manifest product-days；queue attribution用同一 q95 intent stream的 `cap=∞` quote-only actual-working orders。S0不發布循環依賴下游terminal的20M sensitivity；待 S1 canonical q95 20M bundle完成後回填 robustness panel，且不因此改七組 grid或S1 shortlist規則。
+- [x] 新增可重跑 attribution runner。`residual_excursion_bp = basis_mid_bp − anchor_ewma_120s_bp`；primary latent event 是 residual 從 `<= 0` 穿到 `> 0` 開始、到下一個 `<= 0` 結束的正向 excursion，touch cursor 是該 excursion 第一次從 `< D-1 q95 upper` 穿到 `>= upper` 的 raw event。SpreadPair episode只在 touch 後映射 live order，不能拿 order episode 或 compact excursion 的粗時間區間代替 market first-touch cursor。
+- [x] 若 product-session 第一個 eligible raw state 已 `> 0`，該 excursion 標 `left_censored=true`；即使起點已在 upper 上方也不得臆造 first touch。Primary excursion 次數／幅度／touch rate排除它，另列 left-censored count、起點已達 upper count與納入 sensitivity後的結果。
+- [x] 逐月分開報 residual excursion p50／p80／p95、D-1 q95 boundary p50／p80／p95、每 product-day observable excursion 數、touches／product-day、至少一次 touch 的 product-day 比例。
+- [x] First-touch cursor只映射到當時仍在 working 的 `raw_order_fact_id`：`actual_new_send < touch <= active_end`，其中 `active_end` 是 actual cancel send或session expiry，且 `approximate_fill_cursor` 必須為 null或嚴格晚於 touch。`post_touch_fill_rate = approximate_fill_cursor ∈ (touch, active_end] 的 orders / outcome-supported touched raw_order_facts`；另列 BID1／BID2、pooled count 與 product-day 等權值。Nominal submit／stop只作 audit。
+- [x] 用 decomposition 明確回答：touch rate 掉是市場／boundary 問題，post-touch fill 掉是 queue／競爭問題，兩者都掉就兩者並列。
+- [x] 若 boundary lag 可疑，只加 30-session challenger sensitivity；不加入 S1 七組 primary shortlist，除非另改本計畫。
 
 輸出：`doc/quote_fill/AUGUST_ATTRIBUTION_<YYYYMMDD>.md`；一張逐月表、一張雙 panel 圖、attribution bundle。
+
+完成結果（2026-08-24）：[`AUGUST_ATTRIBUTION_20260824.md`](quote_fill/AUGUST_ATTRIBUTION_20260824.md)。May～Jul pooled → August 的 excursion touch rate為 7.1497% → 4.2923%，post-touch approximate fill為1.8796% → 1.2183%，故分類為兩者並列；30-session market-only sensitivity將August hypothetical touch提高至4.5043%，仍未消除落差，不進S1 shortlist。Canonical bundle為`maker/data/walkforward/august_attribution_s0_20260824_v2`，`complete.json` SHA-256 `5bb3addbd674fc85162630a9f2a7033b1d52bec253dfbb698deabb19cdb3f28b`；30-session bundle為`august_attribution_s0_30_session_challenger_20260824_v1`，marker SHA-256 `680d68bf6cccb9f459b19ed199e82bb7b5c6f0a7bbffb3c468e42ad30e2b15ed`。舊`august_attribution_s0_20260824_v1`有explicit L1 clear forward-fill錯誤，已由v2取代且不得引用。
 
 ### S1　七組 policy × Spot Bid maker route
 
