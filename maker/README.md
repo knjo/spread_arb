@@ -1,21 +1,28 @@
 # Maker Basis 研究線
 
-本目錄研究期貨／現貨 basis 的日內 maker 策略：在高 basis 以一腿 maker、另一腿固定約 50 ms 後 taker 建立多現貨／空期貨部位，再於 basis 回落時用同樣結構平倉。
+本目錄研究期貨／現貨 basis 的日內 maker 策略：在高 basis 以一腿 maker、另一腿固定約 50 ms 後 taker 建立多現貨／空期貨部位，
+再於 basis 回落時用同樣結構平倉。
 
 目錄固定分為：
 
-- [`doc/`](doc/README.md)：研究規格、資料契約、skills、assignments 與決策紀錄。
+- [`doc/`](doc/README.md)：研究規格、資料契約、決策紀錄與結果文件。
 - [`src/`](src/README.md)：可重跑的資料處理、模型及回測程式。
-- [`data/`](data/README.md)：本研究衍生的 landmarks、labels、模型與報告；預設不進 Git。
+- [`data/`](data/README.md)：基礎事實、因果 manifest 與各 run 輸出；不進 Git。
 
-第一個 work package 是 [`doc/01_FAIR_MID_BASIS.md`](doc/01_FAIR_MID_BASIS.md)：驗證能否找到穩定、causal、可用於參照掛單的中價 basis。八日 pilot 保留 EWMA120 作 provisional 候選；完整 validation 尚未通過，決策與數據見 [`doc/fair_mid/RESULTS.md`](doc/fair_mid/RESULTS.md)。
+## 現況（2026-08-24）
 
-跨商品的掛單寬度 pilot 已拆到 [`doc/quote_width/RESULTS.md`](doc/quote_width/RESULTS.md)：用 D−1 的 tick／spread／TTBand 與 non-overlap basis excursions 建立 D 日參數表，並明確與 maker fill、50 ms hedge 及完整 EV 分離。
+主線是 **動態商品池因果 pipeline**：月 M 只用完整 M-1 選商品池、日 D 只看 D-1 流動性 gate，再做 1 Hz quote intent →
+approximate makerFill → +50 ms 期貨 hedge → 同日／跨日／到期 terminal path → 10–50M inventory cap 回放。
+入口與結論見 [`doc/quote_fill/README.md`](doc/quote_fill/README.md) 與
+[`doc/quote_fill/DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md`](doc/quote_fill/DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md)。
+目前判斷：研究 edge 為正（uncapped net ≈ 10 bp），但 8 月明顯轉弱，且尚未通過 prospective holdout，不是 production GO。
 
-固定格點的 latent FSM 見 [`doc/quote_width/CYCLE.md`](doc/quote_width/CYCLE.md)，其中 10／15／20／30 BP 與固定 tick 都只作 sensitivity。正式研究入口改為 [`doc/quote_width/ADAPTIVE_BOUNDS.md`](doc/quote_width/ADAPTIVE_BOUNDS.md) 的 D−1 商品別非對稱界線；WP02 再依當下 fair、反腿行情與合法 ladder 產生 rounded action。
+固定 45 檔時代的研究（有 universe leakage）已於 2026-08-24 清理：資料與程式刪除、文件歸檔至
+[`doc/quote_fill/archive_fixed45/`](doc/quote_fill/archive_fixed45/)；程式可由本 repo commit `1348576` 撈回。
 
-分層 raw maker-fill、退後撤單、partial fill、50 ms hedge 與 actual-fill conditional latent exit 的八日 pilot 已完成，結果與限制見 [`doc/quote_fill/PILOT_RESULTS.md`](doc/quote_fill/PILOT_RESULTS.md)。這些表是 action-EV 的資料骨架，尚未包含 executable exit、費稅與 overnight branch，因此不是 production policy。
+已凍結的決策：中價用 causal EWMA120；上下緣用 60-session rolling、正負側分開的 empirical quantile；取樣用
+SpreadPairTotalCount epoch 與 1 Hz final-net；只掛 A/B1–2；hedge 基準 `fill RecvTime + 50 ms`。
 
-全市場擴樣採 [`doc/WALK_FORWARD.md`](doc/WALK_FORWARD.md) 的實盤式契約：上下界與狀態機率每天只用最近 60 個已成熟交易日更新；掛單、撤單與 EV 超參數只在開發／校準期選擇，進入 forward holdout 後完全凍結。131 日 A1-B1 流動性 screen 與第一輪研究商品縮減見 [`doc/quote_fill/LIQUIDITY_SCREEN.md`](doc/quote_fill/LIQUIDITY_SCREEN.md)；八日結果只保留為 end-to-end pilot，不作正式商品排名。
+下一步的研究範圍待重新討論；對照原始規格的缺口與草案在 [`doc/REWORK_PLAN_20260824.md`](doc/REWORK_PLAN_20260824.md)。
 
-既有 `../taker/` 是獨立的 taker 研究線；可重用契約 mapping 與清洗邏輯，但 maker 的取樣、queue 與逐事件撮合另行實作。
+既有 `../taker/` 是獨立的 taker 研究線，本目錄不依賴它。

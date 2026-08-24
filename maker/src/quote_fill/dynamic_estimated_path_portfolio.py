@@ -44,7 +44,7 @@ from ..quote_width.daily_facts import (
     completed_artifact_paths,
     discover_common_sessions,
 )
-from .combined_cost_cap_sweep import TransactionCostProfile
+from .transaction_costs import TransactionCostProfile
 from .portfolio_cap_backtester import (
     PortfolioCapBacktestConfig,
     PortfolioCapBacktestResult,

@@ -73,3 +73,15 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `pseudo_validation_route_stability.csv` | Jul-Aug route stability；retrospective only |
 | `pseudo_validation_stable_core_products.csv` | v6日期／市場別tick ladder下，兩 route 皆達 80% core 的68檔研究池；非 production |
 | `complete.json` | 八個 publication artifacts 的 hash／bytes與source lineage |
+
+## `walkforward/` 現況（2026-08-24 清理後）
+
+固定 45 檔時代的 execution／exit maker／cross-session／post-cross／prequential／aggressive／compact 產物（約 42 GB 含 invalid 快照）已全部刪除；
+資料不可復原，需依 `doc/REWORK_PLAN_20260824.md` 在因果 manifest 上重跑。目前只保留：
+
+| 目錄 | 角色 |
+|---|---|
+| `daily/`、`rolling_boundaries/`、`liquidity/`、`sessions.txt`、`exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1/` | 基礎事實，所有 run 的輸入 |
+| `monthly_product_selector_causal_v2_20260822/` | 因果商品池 manifest（72 日、3,886 product-days） |
+| `order_message_load_causal_v2_20260822_v2/`、`one_second_makerfill_causal_v2_20260822_v1/`、`dynamic_future_hedge_causal_v1_20260822/`、`dynamic_expiry_paired_close_facts_20260822_v1/`、`dynamic_estimated_path_portfolio_causal_v1_20260822/`、`august_exit_extension_causal_v1_20260822/` | 8/22 因果線 q95 輸出；互為 hard-coded 輸入 |
+| `makerfill_rank_l1_l5_sample_20260820_v5/`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1/` | 「只掛 A/B1–2」決策的五日證據 |
