@@ -1,106 +1,116 @@
-# 重作計畫：把因果 pipeline 擴回原始規格
+# 重作計畫（定稿）：把因果 pipeline 擴回原始規格
 
-日期：2026-08-24
-狀態：待執行；本文件是後續工作的唯一 checklist，完成一項就在這裡打勾並填結果連結。
+日期：2026-08-24　狀態：**已討論定案，照此執行**。完成一項就在本文件打勾並填結果連結。
 
-## 為什麼要重作
+## 研究定位（使用者定義）
 
-8/20–8/22 為了修掉固定 45 檔的 universe leakage，重寫了一條因果 pipeline
-（M-1 選月池 → D-1 liquidity gate → 1 Hz quote intent → approximate makerFill → +50 ms hedge
-→ taker/taker frozen-lower exit → inventory cap 回放）。這條線的紀律是對的，但為了趕出端到端結果，
-它是一個 **窄版**：
+這是類套利策略：估好價差、算準執行滑價與稅費，理論上不應賠錢。因此：
 
-| 原始規格 | 舊 fixed-45 線（有 leakage） | 現行因果線 | 缺口 |
-|---|---|---|---|
-| 1a 比較 q50 / q80 / q95 | 三個 q 並列 | **只有 q95**，程式寫死 | 要補 q50、q80 |
-| 1b q vs 中價 ± 固定 15/20/25/30 bp | 只在 8 日 latent path 比過 | 沒做 | 要在 fill／hedge／PnL 層比 |
-| 2a 期現兩條 entry route 分開看 | Future Ask maker 與 Spot Bid maker 都有 | **只有 Spot Bid maker** | 要加回 Future Ask route |
-| 2a 進出場分開看 hedge 滑價 | exit maker 有 replay，但 exit hedge 滑價沒量 | 出場是 taker/taker 估計，沒有 maker exit | 要做 exit maker + exit hedge |
-| 3 只掛 A/B1–2 | 兩本獨立診斷支持 | 已採用 | 無 |
-| 4a SpreadPair 去重 | 已實作 | 已實作 | 無 |
-| 4b 秒 K 掛撤 | 已實作 | 已實作（1 Hz final-net） | 無 |
-| 4c 撤單／成交時間／hedge 欄位 | 有 | 有（`candidate_outcomes.parquet`） | 期貨 route 的欄位在因果線沒有 |
-| 5 各 q 的事件數／掛單／部位／獲利 | 有但 universe 髒 | 只有 q95 | 同 1a／1b |
-| 6 部位控制回測 | 有 | 有，但 exit 假設是 taker/taker | 換成 maker exit 後重跑 |
+- **不設「通過／不通過」門檻**。主報表固定兩個數字：20M cap 成本後日均 net、同日完成率。
+- **同日完成率是最佳化目標**（當沖賣出稅 15 bp vs 隔夜 30 bp）。
+- 界線與商品池**逐月更新、隨市況微調**是設計的一部分（60-session rolling 已是此機制），不是 leakage。
+- 所有閾值都要知道結果，因為未來實盤要靠它們決定怎麼掛。
 
-另外三個不是規格缺口、但會影響數字可不可信的問題：
+## 已定案的決策
 
-- makerFill 是 mixed-clock approximate label（`snapshot RecvTime + Float32 FillSeconds`），沒有 own quantity／partial／cancel race；
-- +50 ms hedge 有 213 筆 gate closed 沒定價、沒 retry，在 20M cap 裡占 9.08M 容量；decision book age p95 0.5 秒、227 筆 > 1 秒；
-- 8 月成交率（0.97%）與同日收斂率（8.39%）崩掉，沒有拆開「basis 行為變了」與「D-1 q95 界線掛太深」。
+| 題 | 決定 |
+|---|---|
+| A1 界線 policy | `q50 / q80 / q95` ＋ 固定對稱 `15 / 20 / 25 / 30 bp`，共 7 組，全跑 |
+| A2 出場下緣 | frozen（submit 當下鎖 `anchor − lower`）；dynamic 只當 sensitivity |
+| A3 8 月惡化 | 先查再跑 A1。假說：8 月價差波動縮、溢價消失（界線碰到率掉）vs 界線掛太深（碰到後成交率掉） |
+| B4 期貨 Ask maker route | 加回來當對照；不做雙路同掛 |
+| B5 成交標籤 | 全程用 `makerFill` 欄位（tick 級，已截我們的撤單時間）；不做 exact replay，只在最終 policy 上跑一次 exact 當校準係數 |
+| B6 hedge 定價 gate 失敗（2.76%） | 往後找 5 秒內第一個合法期貨 book 定價，標 `hedge_delayed=true`，滑價另列；不再當 unpriced 占容量 |
+| C7 exit maker | 先做「現貨 Ask maker → 買期貨 taker」；跑通再加「期貨 Bid maker → 賣現貨 taker」 |
+| C8 13:00 後 | (a) 允許 carry、expiry 前強制平 與 (b) 13:00 起積極平倉、零留倉 **都跑**，比較「犧牲平倉收益換隔日滿部位重作」是否划算 |
+| C9 部位 | **20M（2,000 萬）＋單檔 50%** 為主；其他 cap 之後再做 |
+| D10 驗收 | 無門檻；報 20M 日均 net 與同日完成率 |
 
 ## 固定不變的前提
 
-以下在本輪重作中 **不再重新討論**：
-
-- 商品池：`monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`（72 日、3,886 product-days）。所有新 run 都吃這份 manifest，不得再傳固定 symbol list。
-- 中價：causal EWMA120；上下緣：60-session rolling、`<D`、正負側分開。
+- 商品池：`monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`（72 日、3,886 product-days）；所有 run 吃這份，不得再傳固定 symbol list。
+- 中價 causal EWMA120；q 界線用 60-session rolling、`<D`、正負側分開。固定 bp 對稱，上下都用同一個 W。
 - 取樣：SpreadPairTotalCount epoch、同絕對價不重掛、後撤只撤更積極層、1 Hz final-net。
-- 掛單點位：主研究只掛 A/B1–2。
-- Hedge 基準：`fill RecvTime + 50 ms`，arrival／decision 分開，L1–L5 VWAP，正值＝不利。
-- 成本：現貨雙邊 1.71 bp、賣出稅當沖 15／隔夜 30 bp、期貨雙邊 0.2 bp + TWD 20。
-- 部位：hard cap 10/20/30/40/50M、單品 30%、13:00 停新倉、unresolved 占容量。
-- 所有輸出維持 `production_strategy_go=false`，直到 P5 的 prospective holdout 出來。
+- 只掛 A/B1–2。
+- Hedge：`fill RecvTime + 50 ms`，arrival／decision 分開，L1–L5 VWAP，正值＝不利。
+- 成本：現貨雙邊 1.71 bp、賣出稅當沖 15／隔夜 30 bp、期貨雙邊 0.2 bp + TWD 20（`quote_fill/transaction_costs.py`）。
+- 13:00 停新倉。
 
-## 工作項目
+## 工作項目與順序
 
-優先順序由上而下；P1–P2 可並行，P3 依賴 P1 的 entry positions，P4 依賴 P3，P5 最後。
+```
+S0 8 月歸因 ──► S1 七組 policy（現貨 Bid route）──► S2 期貨 Ask route ──► S3 exit maker ──► S4 13:00 policy ──► S5 定稿與 exact 校準
+                       │
+                       └─ B6 hedge 定價規則在 S1 一起改
+```
 
-### P1　同一 manifest 加跑 q50、q80 與固定 bp challenger（回答 1a／1b／5）
+### S0　8 月惡化歸因（先做，一天）
 
-- [ ] 把 `dynamic_estimated_path_portfolio.py:110` 的 `frozen to q95` 檢查改成接受 `boundary_policy ∈ {q50, q80, q95, fixed15, fixed20, fixed25, fixed30}`；上游 `one_second_makerfill_runner.attach_q95_boundaries` 同步泛化為 `attach_boundaries(policy)`。
-- [ ] 固定 bp 的定義：`upper = anchor + W`、`lower = anchor − W`，對稱；W 同時用於 frozen lower。不做每商品 tick 對齊以外的任何調整。
-- [ ] 每個 policy 各自跑完整鏈：message load → makerFill → hedge → path → cap 回放。輸出根目錄命名 `*_causal_<policy>_<date>`。
-- [ ] 同一張 raw order 若被多個 policy 命中，保留 `physical_order_id` 共用，跨 policy 不可相加（沿用 PILOT_RESULTS 的 alias 規則）。
-- [ ] 產出一張 policy 比較表：candidates、fill 率、cancel 率、hedge slip p50/p95、同日／跨日／expiry 比例、uncapped net bp、20M cap realized net、日均新 spot。
-- [ ] 加一欄「q target 落在 B1／B2／B3+ 的 product-seconds 比例」，讓 fixed bp 與 q 的機會數差異看得見。
+- [ ] 逐月（May–Aug）：mid-basis excursion 分布（p50/p80/p95 幅度、每日 excursion 數）vs 當日 D-1 q95 界線位置。
+- [ ] 分開報「界線碰到率」（latent）與「碰到後 makerFill 成交率」；兩者哪個掉，決定是市況還是界線。
+- [ ] 若是市況：S1 的固定 bp 組會直接顯示哪個寬度在 8 月還有機會數，不用另外處理。若是界線：檢查 60-session rolling 在 regime 轉換時的滯後，考慮加 30-session challenger（只作 sensitivity）。
 
-完成判準：七個 policy 的比較表在同一份 md，並附各自的 `complete.json` SHA。
+輸出：`doc/quote_fill/AUGUST_ATTRIBUTION_<date>.md`，一張逐月表 + 一張圖。
 
-### P2　把 Future Ask maker → Spot taker route 加回因果線（回答 2a 期現分開）
+### S1　七組 policy × 現貨 Bid maker route
 
-- [ ] `one_second_makerfill_runner` 目前只 join 現貨 `Bid1/Bid2_FillSeconds`；期貨 maker 沒有等價的 legacy makerFill label，要沿用 fixed-45 階段的 indexed replay（`execution_runner` + `indexed_replay`）產 exact fill，但輸入改為 manifest 的 `(Date, ValueCode)`，**先移除 `sessions × symbols` 笛卡兒積介面**。
-- [ ] Hedge 方向反過來：fill + 50 ms 買現貨 2 lots，L1–L5 VWAP；期貨一口沒有 partial。
-- [ ] 期貨 5 requests/s：期貨 maker quote 與 fill hedge 共用同一個 limiter，fill hedge 優先；message load 表要重算。
-- [ ] 輸出與 P1 相同欄位，並在比較表加 route 維度。兩 route 的 sampling contract 不同（spot snapshot vs anchor 觸發），**只並列不 pooling**。
+- [ ] `one_second_makerfill_runner.attach_q95_boundaries` 泛化為 `attach_boundaries(policy)`，policy ∈ {q50, q80, q95, fixed15, fixed20, fixed25, fixed30}。
+- [ ] `dynamic_estimated_path_portfolio.py:110` 拿掉 `frozen to q95`；frozen lower 對 fixed 組 = `anchor − W`。
+- [ ] `dynamic_future_hedge`：gate 失敗改為往後 5 秒內第一個合法 book，加 `hedge_delayed`、`hedge_delay_ms` 欄；summary 分 on-time／delayed 兩列報滑價。
+- [ ] cap 回放改 20M＋單檔 50%。
+- [ ] 每個 policy 各自跑完整鏈，輸出根目錄 `*_causal_<policy>_<date>`；同一張 raw order 被多 policy 命中時共用 `physical_order_id`，跨 policy 不相加。
+- [ ] 比較表欄位：candidates、q target 落在 B1／B2／B3+ 的 product-seconds 比例、fill 率、cancel 率、submit-to-fill p50/p95、hedge slip p50/p95（on-time／delayed）、同日／跨日／expiry 比例、uncapped net bp、**20M 日均 net、同日完成率**、日均新 spot。
+- [ ] 逐月拆一次同一張表（May／Jun／Jul／Aug）。
 
-完成判準：兩條 entry route 在同一 manifest、同一 policy 下的 fill／cancel／hedge slip／path 表。
+輸出：`doc/quote_fill/POLICY_COMPARISON_SPOT_BID_<date>.md`。
 
-### P3　Exit maker + exit hedge（回答 2a 進出分開）
+### S2　期貨 Ask maker → 買現貨 taker route（對照）
 
-- [ ] 對 P1／P2 的每筆 entry position，在 frozen lower 掛兩條 exit maker route：`Future Bid maker → Sell Spot taker`、`Spot Ask maker → Buy Future taker`。取樣、分層、後撤規則與 entry 相同。
-- [ ] Exit hedge 滑價用與 entry 相同的 arrival／decision 算法，四條 route 各出一張 slip 表。
-- [ ] Exit maker 未成交者的 competing outcome：同日 taker/taker（現行 1 Hz first passage 當 control）、carry、expiry proxy。三者互斥。
-- [ ] FIFO inventory：同商品多個 position 的 exit order 要合成「商品 × 絕對價」的實際 working order，不能逐 position 各掛一張再相加（ORDER_MESSAGE_LOAD 已指出這會嚴重高估）。
-- [ ] 先只做 spot-entry route 的 exit，跑通後再接 future-entry route。
+- [ ] 期貨 maker 沒有 legacy makerFill 欄位，用 `execution_runner` + `indexed_replay` 產 fill；**先拆掉 `sessions × symbols` 笛卡兒積介面**，改讀 manifest 的 `(Date, ValueCode)`。
+- [ ] Hedge 反向：fill + 50 ms 買現貨 2 lots，L1–L5 VWAP；期貨一口無 partial。
+- [ ] 期貨 5 requests/s：maker quote 與 fill hedge 共用 limiter，hedge 優先；message load 重算。
+- [ ] 與 S1 相同欄位，加 route 維度；兩 route sampling contract 不同，**只並列不 pooling**。
+- [ ] 先跑 S1 表現最好的 2 組 policy，不必 7 組全跑。
 
-完成判準：每筆 position 有 `exit_route / exit_fill_time / exit_hedge_slip_bp / exit_outcome` 四欄，cap 回放改吃這組 terminal。
+輸出：`doc/quote_fill/POLICY_COMPARISON_FUTURE_ASK_<date>.md`。
 
-### P4　Hedge fail-safe 與 makerFill 精度
+### S3　Exit maker（先一條 route）
 
-- [ ] 213 筆 gate closed：加 retry 規則（每秒重查 decision book，最多 N 秒；超時以現貨 taker 平掉 spot），規則在 P1 之前先凍結寫進本文件，不看結果調。
-- [ ] Book freshness sensitivity：decision book age > 1 秒的 hedge 分別以「用該舊 book」與「標 unpriced」兩種處理各出一版數字。
-- [ ] makerFill exact 校準：從 manifest 抽 5 個固定日，用 indexed replay 算 exact own-quantity fill，對 approximate 2.37% 給正式修正係數與信賴區間，取代舊 5 日 fixed-45 的 1.88→1.72% 粗估。
+- [ ] 對 S1 每筆 entry position，在 frozen lower 掛「現貨 Ask maker」，成交後 +50 ms 買期貨 taker。取樣、分層、後撤規則與 entry 相同。
+- [ ] Exit hedge 滑價用 entry 同一套 arrival／decision 算法，另出一張表。
+- [ ] 未成交的 competing outcome：同日 taker/taker（現行 1 Hz first passage 當 control）、carry、expiry。三者互斥。
+- [ ] FIFO：同商品多 position 的 exit 合成「商品 × 絕對價」一張 working order，不逐 position 相加。
+- [ ] 完成後 cap 回放改吃這組 terminal；與 S1 的 taker/taker 版並列，看 exit maker 多賺多少。
+- [ ] 跑通後加「期貨 Bid maker → 賣現貨 taker」。
 
-### P5　8 月惡化歸因 + prospective holdout
+輸出：每筆 position 有 `exit_route / exit_fill_time / exit_hedge_slip_bp / exit_outcome`；`doc/quote_fill/EXIT_MAKER_CAUSAL_<date>.md`。
 
-- [ ] 對 May–Aug 逐月畫：實際 basis excursion 分布 vs D-1 q80／q95 界線位置；分開報「界線碰到率」與「碰到後 fill 率」。若界線碰到率沒掉而 fill 率掉，是 queue／競爭問題；反之是 boundary 掛太深。
-- [ ] 8/14 之後的新資料一律不進任何門檻選擇；P1–P4 規則凍結後，第一個完整月（2026-09）作 prospective holdout。
-- [ ] Holdout 報表與 development 報表格式完全相同，只多一欄 `holdout=true`。
+### S4　13:00 後 policy：carry vs 積極平倉
 
-### P6　工程與文件（可隨時做，不阻塞）
+- [ ] (a) carry：13:00 後停新倉、exit maker 繼續掛到收盤；未平者隔日續掛；expiry 前一日 13:00 起強制 taker 平。
+- [ ] (b) aggressive：13:00 起 exit 改為 B1／A1 peg（沿用舊 aggressive controller 的邏輯，程式需從快照撈回重寫成 manifest 版），13:20 目標零留倉。
+- [ ] 兩者在 20M cap 下比：日均 net、同日完成率、隔日開盤可用容量、平倉收益犧牲量。
+- [ ] 回答使用者的問題：「每天犧牲一部分平倉收益積極平倉，換隔日滿部位重作」是否更好。
 
-- [ ] `.gitignore` 第 22 行 `src/research/*/` 改為只排除 `src/research/*/data/`，把 `src/` 與 `doc/` 納入版控。（2026-08-24 已提出，待使用者決定）
-- [ ] `data/_trash_20260824/` 確認後刪除；另外兩個大目錄 `exit_maker_narrow_60d`（14G）與 `..._candidate_session_cache_v8`（7.4G）是 fixed-45 時代的 exit maker 結果，P3 出來後即可刪。
-- [ ] `doc/quote_fill/README.md` 索引補上 8/22 四份文件，並把 fixed-45 時代的結果統一標 `archive`。
-- [ ] 頂層 `README.md` 改寫成「動態池因果線」的入口，移除「131 日 A1-B1 screen」作為主線的描述。
+輸出：`doc/quote_fill/CLOSE_POLICY_CARRY_VS_AGGRESSIVE_<date>.md`。
 
-## 目前 data/ 的分層
+### S5　定稿與校準
 
-| 層 | 目錄 | 大小 | 處置 |
-|---|---|---:|---|
-| 基礎事實（所有 run 的輸入） | `walkforward/daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、`exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1` | 21G | 保留 |
-| 因果線 canonical（8/22） | `monthly_product_selector_causal_v2_20260822`、`order_message_load_causal_v2_20260822_v2`、`one_second_makerfill_causal_v2_20260822_v1`、`dynamic_future_hedge_causal_v1_20260822`、`dynamic_estimated_path_portfolio_causal_v1_20260822`、`dynamic_expiry_paired_close_facts_20260822_v1`、`august_exit_extension_causal_v1_20260822` | ~230M | 保留；P1 完成後成為 q95 baseline |
-| fixed-45 archive（有 leakage，只供對照與 P2／P3 借程式） | `execution_narrow_60d`、`exit_maker_narrow_60d`、`exit_maker_cross_session_narrow_60d` + `_candidate_session_cache_v8`、`overnight_carry_*`、`post_cross_*`、`prequential_*`、`aggressive_1300_*`、`compact_*`、`makerfill_rank_*_v5`、`future_ask_rank_*`、`normal_carry_cap_sweep_*_v2`、`portfolio_cap_completed_only_*`、`cross_session_prerequisites_*`、`d_safe_universe_audit_*`、`current_cohort_preopen_*`、`supplemental_sampling_*`、`exit_maker_interim_*`、`compact_remaining_time_*` | ~22G | 保留到 P3 完成 |
-| 已搬走 | `data/_trash_20260824/` | 19G | 確認後 `rm -rf` |
-| 八日 pilot | `fair_mid/`、`quote_fill/`、`quote_width/` | 110M | 保留（WP01 結果與 8 日 raw pilot） |
+- [ ] 從 S1–S4 選定 policy／route／close 組合，寫成一份 `STRATEGY_SPEC_<date>.md`：每日開盤前要算什麼、盤中怎麼掛、13:00 後怎麼做。
+- [ ] 對選定組合抽 5 個固定日跑 exact own-quantity replay，給 makerFill 的校準係數（預期約 0.9×）。
+- [ ] 2026-09 資料到齊後，用同一套凍結規則跑一次，與 development 期並列；不設門檻，只看兩個主數字有沒有掉。
+
+### 隨時可做
+
+- [ ] `doc/quote_fill/README.md` 隨各 S 完成更新索引。
+- [ ] 舊 aggressive／exit maker 程式需要時從 commit `1348576` 撈。
+
+## 目前 data/ 分層
+
+| 層 | 目錄 | 大小 |
+|---|---|---:|
+| 基礎事實（所有 run 的輸入） | `walkforward/daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、`exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1` | 21G |
+| 因果 manifest | `monthly_product_selector_causal_v2_20260822` | 6M |
+| 8/22 q95 baseline（S1 會產生等價物後可刪） | `order_message_load_*`、`one_second_makerfill_*`、`dynamic_future_hedge_*`、`dynamic_expiry_paired_close_*`、`dynamic_estimated_path_portfolio_*`、`august_exit_extension_*` | 230M |
+| A/B1–2 決策證據 | `makerfill_rank_l1_l5_sample_20260820_v5`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1` | 13M |
+| 八日 pilot | `fair_mid/`、`quote_fill/`、`quote_width/` | 110M |
