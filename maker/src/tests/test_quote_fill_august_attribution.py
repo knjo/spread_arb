@@ -30,7 +30,9 @@ from ..quote_fill.august_attribution_runner import (
     MANIFEST_SHA256,
     SCENARIO_ID,
     AttributionPaths,
+    _add_raw_analysis_fields,
     _canonical_checks,
+    _merge_venue_state_events,
     _membership_sensitivity,
     _raw_order_id,
     _session_second_ns,
@@ -319,6 +321,152 @@ def _verify_quote_outputs(
 
 
 class AugustAttributionTest(unittest.TestCase):
+    def test_venue_merge_preserves_explicit_book_clear(self) -> None:
+        common = {
+            "Date": "20260803",
+            "ValueCode": "2330",
+            "QuoteCode": "CDFU6",
+        }
+        spot = pl.from_dicts(
+            [
+                {
+                    **common,
+                    "cursor_time_ns": 10,
+                    "cursor_event_sequence": RAW_SPOT_PHASE,
+                    "cursor_row_index": 1,
+                    "event_source": "spot",
+                    "spot_formal": True,
+                    "spot_bid": 100.0,
+                    "spot_ask": 101.0,
+                    "spot_bid_lots": 5,
+                    "spot_ask_lots": 6,
+                    "spot_ref_price": 100.5,
+                    "spread_pair_epoch": 1,
+                },
+                {
+                    **common,
+                    "cursor_time_ns": 30,
+                    "cursor_event_sequence": RAW_SPOT_PHASE,
+                    "cursor_row_index": 2,
+                    "event_source": "spot",
+                    "spot_formal": True,
+                    "spot_bid": 100.0,
+                    "spot_ask": None,
+                    "spot_bid_lots": 5,
+                    "spot_ask_lots": None,
+                    "spot_ref_price": 100.5,
+                    "spread_pair_epoch": 2,
+                },
+                {
+                    **common,
+                    "cursor_time_ns": 50,
+                    "cursor_event_sequence": RAW_SPOT_PHASE,
+                    "cursor_row_index": 3,
+                    "event_source": "spot",
+                    "spot_formal": True,
+                    "spot_bid": 99.0,
+                    "spot_ask": 100.0,
+                    "spot_bid_lots": 7,
+                    "spot_ask_lots": 8,
+                    "spot_ref_price": 100.5,
+                    "spread_pair_epoch": 3,
+                },
+                {
+                    **common,
+                    "cursor_time_ns": 60,
+                    "cursor_event_sequence": RAW_SPOT_PHASE,
+                    "cursor_row_index": 4,
+                    "event_source": "spot",
+                    "spot_formal": True,
+                    "spot_bid": 99.0,
+                    "spot_ask": 100.0,
+                    "spot_bid_lots": 7,
+                    "spot_ask_lots": 8,
+                    "spot_ref_price": 100.5,
+                    "spread_pair_epoch": 4,
+                },
+            ],
+            infer_schema_length=None,
+        )
+        future = pl.from_dicts(
+            [
+                {
+                    **common,
+                    "cursor_time_ns": time_ns,
+                    "cursor_event_sequence": RAW_FUTURE_PHASE,
+                    "cursor_row_index": row_index,
+                    "event_source": "future",
+                    "future_formal": True,
+                    "future_bid": 110.0,
+                    "future_ask": 111.0,
+                    "future_bid_lots": 2,
+                    "future_ask_lots": 3,
+                    "future_exec_bid": 110.0,
+                    "future_exec_ask": 111.0,
+                    "future_exec_bid_lots": 2,
+                    "future_exec_ask_lots": 3,
+                    "future_ref_price": 110.5,
+                }
+                for row_index, time_ns in enumerate((20, 40), start=1)
+            ]
+            + [
+                {
+                    **common,
+                    "cursor_time_ns": 60,
+                    "cursor_event_sequence": RAW_FUTURE_PHASE,
+                    "cursor_row_index": 3,
+                    "event_source": "future",
+                    "future_formal": True,
+                    "future_bid": None,
+                    "future_ask": 111.0,
+                    "future_bid_lots": None,
+                    "future_ask_lots": 3,
+                    "future_exec_bid": None,
+                    "future_exec_ask": 111.0,
+                    "future_exec_bid_lots": None,
+                    "future_exec_ask_lots": 3,
+                    "future_ref_price": 110.5,
+                }
+            ],
+            infer_schema_length=None,
+        )
+
+        merged = _merge_venue_state_events(spot, future)
+        by_cursor = {
+            (
+                int(row["cursor_time_ns"]),
+                int(row["cursor_event_sequence"]),
+            ): row
+            for row in merged.iter_rows(named=True)
+        }
+        self.assertEqual(by_cursor[(20, RAW_FUTURE_PHASE)]["spot_ask"], 101.0)
+        self.assertIsNone(by_cursor[(30, RAW_SPOT_PHASE)]["spot_ask"])
+        self.assertIsNone(by_cursor[(40, RAW_FUTURE_PHASE)]["spot_ask"])
+        self.assertEqual(by_cursor[(50, RAW_SPOT_PHASE)]["spot_ask"], 100.0)
+        self.assertEqual(by_cursor[(40, RAW_FUTURE_PHASE)]["spread_pair_epoch"], 2)
+        self.assertIsNone(by_cursor[(60, RAW_FUTURE_PHASE)]["future_bid"])
+        self.assertIsNone(by_cursor[(60, RAW_SPOT_PHASE)]["future_bid"])
+
+        analyzed = _add_raw_analysis_fields(
+            merged.with_columns(
+                pl.lit(900.0).alias("anchor_ewma_120s_bp"),
+                pl.lit(20.0).alias("upper_distance_bp"),
+            )
+        )
+        eligible = {
+            (
+                int(row["cursor_time_ns"]),
+                int(row["cursor_event_sequence"]),
+            ): bool(row["analysis_eligible_raw"])
+            for row in analyzed.iter_rows(named=True)
+        }
+        self.assertTrue(eligible[(20, RAW_FUTURE_PHASE)])
+        self.assertFalse(eligible[(30, RAW_SPOT_PHASE)])
+        self.assertFalse(eligible[(40, RAW_FUTURE_PHASE)])
+        self.assertTrue(eligible[(50, RAW_SPOT_PHASE)])
+        self.assertFalse(eligible[(60, RAW_FUTURE_PHASE)])
+        self.assertFalse(eligible[(60, RAW_SPOT_PHASE)])
+
     def test_quote_loop_fill_terminal_and_same_cursor_cancel_noop(self) -> None:
         base_ns = _session_second_ns("20260803", 0)
         events, outcomes = _quote_inputs(
@@ -563,8 +711,22 @@ class AugustAttributionTest(unittest.TestCase):
             git_state={"dirty": False},
             tests={"status": "pass"},
             input_inventory=inventory,
+            raw_tape_reconstruction_verified=True,
         )
         self.assertTrue(all(checks.values()))
+
+        unverified_raw = _canonical_checks(
+            paths,
+            requested_dates=None,
+            selected_dates=dates,
+            manifest=manifest,
+            git_state={"dirty": False},
+            tests={"status": "pass"},
+            input_inventory=inventory,
+        )
+        self.assertFalse(
+            unverified_raw["raw_tape_reconstruction_verified"]
+        )
 
         skipped = _canonical_checks(
             paths,
@@ -574,6 +736,7 @@ class AugustAttributionTest(unittest.TestCase):
             git_state={"dirty": False},
             tests={"status": "skipped_debug"},
             input_inventory=inventory,
+            raw_tape_reconstruction_verified=True,
         )
         self.assertFalse(skipped["focused_tests_passed"])
 
@@ -585,6 +748,7 @@ class AugustAttributionTest(unittest.TestCase):
             git_state={"dirty": False},
             tests={"status": "pass"},
             input_inventory=inventory,
+            raw_tape_reconstruction_verified=True,
         )
         self.assertFalse(subset["full_manifest_date_run"])
 
@@ -601,6 +765,7 @@ class AugustAttributionTest(unittest.TestCase):
             git_state={"dirty": False},
             tests={"status": "pass"},
             input_inventory=inventory,
+            raw_tape_reconstruction_verified=True,
         )
         self.assertFalse(unhashed["all_inputs_full_content_sha256"])
 

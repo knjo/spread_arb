@@ -62,7 +62,7 @@ from .venue_scheduler import (
     VenueRequestIntent,
 )
 
-RUNNER_VERSION = "august_attribution_raw_touch_quote_only_v2"
+RUNNER_VERSION = "august_attribution_raw_touch_quote_only_v3"
 SCENARIO_ID = "ab12_entry_until_1300"
 ROUTE_ID = "spot_bid_future_taker"
 STAGE_ID = "entry"
@@ -82,7 +82,15 @@ EXPECTED_SESSION_COUNT = 72
 EXPECTED_PRODUCT_DAY_COUNT = 3_886
 EXPECTED_FIRST_DATE = "20260504"
 EXPECTED_LAST_DATE = "20260813"
-EXPECTED_INPUT_RECORD_COUNT = 2 + (8 * EXPECTED_SESSION_COUNT)
+EXPECTED_DAILY_MARKER_COUNT = 131
+# Manifest + four rolling-publication artifacts + every daily marker consumed
+# by rolling provenance validation + nine selected-day calculation/validation
+# artifacts per entry session.
+EXPECTED_INPUT_RECORD_COUNT = (
+    5
+    + EXPECTED_DAILY_MARKER_COUNT
+    + (9 * EXPECTED_SESSION_COUNT)
+)
 
 DEFAULT_MANIFEST_PATH = (
     MAKER_ROOT
@@ -117,7 +125,7 @@ DEFAULT_OUTPUT_ROOT = (
     MAKER_ROOT
     / "data"
     / "walkforward"
-    / "august_attribution_s0_20260824_v1"
+    / "august_attribution_s0_20260824_v2"
 )
 
 FOCUSED_TEST_MODULES = (
@@ -126,6 +134,7 @@ FOCUSED_TEST_MODULES = (
     "maker.src.tests.test_quote_fill_one_second_message_load_runner",
     "maker.src.tests.test_quote_fill_one_second_makerfill_runner",
     "maker.src.tests.test_quote_fill_august_attribution",
+    "maker.src.tests.test_quote_fill_august_attribution_30_session",
 )
 
 FRAME_ARTIFACTS = (
@@ -145,6 +154,37 @@ NONFRAME_ARTIFACTS = (
     "august_attribution_dual_panel.png",
     "run_config.json",
     "verification.json",
+)
+
+_RAW_EVENT_KEY_COLUMNS = (
+    "Date",
+    "ValueCode",
+    "QuoteCode",
+    "cursor_time_ns",
+    "cursor_event_sequence",
+    "cursor_row_index",
+    "event_source",
+)
+_SPOT_STATE_COLUMNS = (
+    "spot_formal",
+    "spot_bid",
+    "spot_ask",
+    "spot_bid_lots",
+    "spot_ask_lots",
+    "spot_ref_price",
+    "spread_pair_epoch",
+)
+_FUTURE_STATE_COLUMNS = (
+    "future_formal",
+    "future_bid",
+    "future_ask",
+    "future_bid_lots",
+    "future_ask_lots",
+    "future_exec_bid",
+    "future_exec_ask",
+    "future_exec_bid_lots",
+    "future_exec_ask_lots",
+    "future_ref_price",
 )
 
 
@@ -293,26 +333,7 @@ def build_raw_residual_states(
     del spot, future, spread_clock
     gc.collect()
 
-    merged = pl.concat(
-        [future_events, spot_events],
-        how="diagonal_relaxed",
-    ).sort(
-        [
-            "ValueCode",
-            "cursor_time_ns",
-            "cursor_event_sequence",
-            "cursor_row_index",
-        ]
-    )
-    state_columns = [
-        name
-        for name in merged.columns
-        if name.startswith(("spot_", "future_"))
-        or name == "spread_pair_epoch"
-    ]
-    merged = merged.with_columns(
-        *(pl.col(name).forward_fill().over("ValueCode") for name in state_columns)
-    )
+    merged = _merge_venue_state_events(spot_events, future_events)
     fair = pl.concat(
         [
             source.causal_fair.select(
@@ -344,64 +365,7 @@ def build_raw_residual_states(
         how="left",
         validate="m:1",
     )
-    spot_book_ok = (
-        (pl.col("spot_bid") > 0)
-        & (pl.col("spot_ask") > 0)
-        & (pl.col("spot_bid_lots") > 0)
-        & (pl.col("spot_ask_lots") > 0)
-        & (pl.col("spot_bid") <= pl.col("spot_ask"))
-    ).fill_null(False)
-    future_book_ok = (
-        (pl.col("future_bid") > 0)
-        & (pl.col("future_ask") > 0)
-        & (pl.col("future_bid_lots") > 0)
-        & (pl.col("future_ask_lots") > 0)
-        & (pl.col("future_bid") <= pl.col("future_ask"))
-    ).fill_null(False)
-    future_exec_ok = (
-        (pl.col("future_exec_bid") > 0)
-        & (pl.col("future_exec_ask") > 0)
-        & (pl.col("future_exec_bid_lots") > 0)
-        & (pl.col("future_exec_ask_lots") > 0)
-        & (pl.col("future_exec_bid") <= pl.col("future_exec_ask"))
-    ).fill_null(False)
-    spot_ref_ok = _strict_ref_band(
-        "spot_ref_price", ("spot_bid", "spot_ask")
-    )
-    future_ref_ok = _strict_ref_band(
-        "future_ref_price",
-        (
-            "future_bid",
-            "future_ask",
-            "future_exec_bid",
-            "future_exec_ask",
-        ),
-    )
-    eligible = (
-        pl.col("spot_formal").fill_null(False)
-        & pl.col("future_formal").fill_null(False)
-        & spot_book_ok
-        & future_book_ok
-        & future_exec_ok
-        & spot_ref_ok
-        & future_ref_ok
-        & pl.col("anchor_ewma_120s_bp").is_finite()
-        & pl.col("upper_distance_bp").is_finite()
-    ).fill_null(False)
-    spot_mid = (pl.col("spot_bid") + pl.col("spot_ask")) / 2.0
-    future_mid = (pl.col("future_bid") + pl.col("future_ask")) / 2.0
-    merged = merged.with_columns(
-        eligible.alias("analysis_eligible_raw"),
-        pl.when(eligible)
-        .then((future_mid / spot_mid - 1.0) * 10_000.0)
-        .otherwise(None)
-        .alias("basis_mid_bp"),
-    ).with_columns(
-        pl.when(pl.col("analysis_eligible_raw"))
-        .then(pl.col("basis_mid_bp") - pl.col("anchor_ewma_120s_bp"))
-        .otherwise(None)
-        .alias("residual_excursion_bp")
-    )
+    merged = _add_raw_analysis_fields(merged)
 
     group = ["Date", "ValueCode"]
     changed = merged.with_columns(
@@ -451,6 +415,140 @@ def build_raw_residual_states(
             "cursor_event_sequence",
             "cursor_row_index",
         ]
+    )
+
+
+def _merge_venue_state_events(
+    spot_events: pl.DataFrame,
+    future_events: pl.DataFrame,
+) -> pl.DataFrame:
+    """Merge venue clocks without reviving an explicitly cleared book level.
+
+    A null venue struct means that the row came from the *other* venue and
+    should inherit the last state.  A non-null struct whose fields contain
+    nulls is a genuine snapshot that explicitly cleared those fields.  Scalar
+    forward-fill cannot distinguish those cases, so venue state must remain
+    packed until after the two clocks have been merged.
+    """
+
+    for frame, source, phase, state_columns in (
+        (spot_events, "spot", RAW_SPOT_PHASE, _SPOT_STATE_COLUMNS),
+        (future_events, "future", RAW_FUTURE_PHASE, _FUTURE_STATE_COLUMNS),
+    ):
+        missing = sorted(
+            set(_RAW_EVENT_KEY_COLUMNS + state_columns) - set(frame.columns)
+        )
+        if missing:
+            raise ValueError(f"{source} raw event state missing columns: {missing}")
+        invalid = frame.filter(
+            pl.any_horizontal(
+                *(pl.col(name).is_null() for name in _RAW_EVENT_KEY_COLUMNS)
+            )
+            | (pl.col("event_source") != source)
+            | (pl.col("cursor_event_sequence") != phase)
+        )
+        if not invalid.is_empty():
+            raise ValueError(f"{source} raw event source/phase/key contract failed")
+        cursor_key = [
+            "Date",
+            "ValueCode",
+            "QuoteCode",
+            "cursor_time_ns",
+            "cursor_event_sequence",
+            "cursor_row_index",
+        ]
+        if frame.select(*cursor_key).n_unique() != frame.height:
+            raise ValueError(f"{source} raw event cursors are duplicated")
+
+    packed_spot = spot_events.select(
+        *_RAW_EVENT_KEY_COLUMNS,
+        pl.struct(*_SPOT_STATE_COLUMNS).alias("_spot_state"),
+    )
+    packed_future = future_events.select(
+        *_RAW_EVENT_KEY_COLUMNS,
+        pl.struct(*_FUTURE_STATE_COLUMNS).alias("_future_state"),
+    )
+    group = ["Date", "ValueCode", "QuoteCode"]
+    order = [
+        "Date",
+        "ValueCode",
+        "QuoteCode",
+        "cursor_time_ns",
+        "cursor_event_sequence",
+        "cursor_row_index",
+    ]
+    return (
+        pl.concat([packed_future, packed_spot], how="diagonal_relaxed")
+        .sort(order)
+        .with_columns(
+            pl.col("_spot_state").forward_fill().over(group),
+            pl.col("_future_state").forward_fill().over(group),
+        )
+        .unnest(["_spot_state", "_future_state"])
+        .sort(order)
+    )
+
+
+def _add_raw_analysis_fields(merged: pl.DataFrame) -> pl.DataFrame:
+    """Apply the raw-book validity gates and compute causal residual state."""
+
+    spot_book_ok = (
+        (pl.col("spot_bid") > 0)
+        & (pl.col("spot_ask") > 0)
+        & (pl.col("spot_bid_lots") > 0)
+        & (pl.col("spot_ask_lots") > 0)
+        & (pl.col("spot_bid") <= pl.col("spot_ask"))
+    ).fill_null(False)
+    future_book_ok = (
+        (pl.col("future_bid") > 0)
+        & (pl.col("future_ask") > 0)
+        & (pl.col("future_bid_lots") > 0)
+        & (pl.col("future_ask_lots") > 0)
+        & (pl.col("future_bid") <= pl.col("future_ask"))
+    ).fill_null(False)
+    future_exec_ok = (
+        (pl.col("future_exec_bid") > 0)
+        & (pl.col("future_exec_ask") > 0)
+        & (pl.col("future_exec_bid_lots") > 0)
+        & (pl.col("future_exec_ask_lots") > 0)
+        & (pl.col("future_exec_bid") <= pl.col("future_exec_ask"))
+    ).fill_null(False)
+    spot_ref_ok = _strict_ref_band(
+        "spot_ref_price", ("spot_bid", "spot_ask")
+    )
+    future_ref_ok = _strict_ref_band(
+        "future_ref_price",
+        (
+            "future_bid",
+            "future_ask",
+            "future_exec_bid",
+            "future_exec_ask",
+        ),
+    )
+    eligible = (
+        pl.col("spot_formal").fill_null(False)
+        & pl.col("future_formal").fill_null(False)
+        & spot_book_ok
+        & future_book_ok
+        & future_exec_ok
+        & spot_ref_ok
+        & future_ref_ok
+        & pl.col("anchor_ewma_120s_bp").is_finite()
+        & pl.col("upper_distance_bp").is_finite()
+    ).fill_null(False)
+    spot_mid = (pl.col("spot_bid") + pl.col("spot_ask")) / 2.0
+    future_mid = (pl.col("future_bid") + pl.col("future_ask")) / 2.0
+    return merged.with_columns(
+        eligible.alias("analysis_eligible_raw"),
+        pl.when(eligible)
+        .then((future_mid / spot_mid - 1.0) * 10_000.0)
+        .otherwise(None)
+        .alias("basis_mid_bp"),
+    ).with_columns(
+        pl.when(pl.col("analysis_eligible_raw"))
+        .then(pl.col("basis_mid_bp") - pl.col("anchor_ewma_120s_bp"))
+        .otherwise(None)
+        .alias("residual_excursion_bp")
     )
 
 
@@ -1173,6 +1271,18 @@ def _add_formal_state(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _explicit_l1_clear_rows(frame: pl.DataFrame) -> int:
+    """Count genuine L1 snapshots that explicitly clear either best side."""
+
+    return frame.filter(
+        pl.col("raw_has_l1_book")
+        & (
+            pl.col("bid_price_1").is_null()
+            | pl.col("ask_price_1").is_null()
+        )
+    ).height
+
+
 def _strict_ref_band(reference: str, prices: Iterable[str]) -> pl.Expr:
     result = pl.col(reference).is_finite() & (pl.col(reference) > 0)
     for price in prices:
@@ -1230,12 +1340,25 @@ def run(
         "returncode": None,
         "output_tail": None,
     }
+    probe_manifest, _ = load_manifest_and_boundaries(
+        paths.manifest_path,
+        paths.boundary_path,
+        dates=dates,
+    )
+    selected_dates = probe_manifest["Date"].unique().sort().to_list()
+    input_inventory = _input_inventory(paths, selected_dates)
     manifest, boundary_rows = load_manifest_and_boundaries(
         paths.manifest_path,
         paths.boundary_path,
         dates=dates,
     )
-    selected_dates = manifest["Date"].unique().sort().to_list()
+    reloaded_dates = manifest["Date"].unique().sort().to_list()
+    if reloaded_dates != selected_dates or not manifest.equals(
+        probe_manifest,
+        null_equal=True,
+    ):
+        raise ValueError("manifest changed between date probe and inventory")
+    del probe_manifest
 
     excursion_parts: list[pl.DataFrame] = []
     order_parts: list[pl.DataFrame] = []
@@ -1281,6 +1404,12 @@ def run(
         )
         raw_spot_rows = batch.raw_tape.spot_states.height
         raw_future_rows = batch.raw_tape.future_states.height
+        spot_explicit_l1_clear_rows = _explicit_l1_clear_rows(
+            batch.raw_tape.spot_states
+        )
+        future_explicit_l1_clear_rows = _explicit_l1_clear_rows(
+            batch.raw_tape.future_states
+        )
         raw_states = build_raw_residual_states(batch, boundary_day)
         cutoff_ns = _session_second_ns(date, ENTRY_CUTOFF_SECOND)
         primary_states = raw_states.filter(
@@ -1361,6 +1490,8 @@ def run(
                 "selected_products": manifest_day.height,
                 "raw_spot_rows": raw_spot_rows,
                 "raw_future_rows": raw_future_rows,
+                "spot_explicit_l1_clear_rows": spot_explicit_l1_clear_rows,
+                "future_explicit_l1_clear_rows": future_explicit_l1_clear_rows,
                 "raw_residual_change_rows": raw_states.height,
                 "primary_residual_change_rows": primary_states.height,
                 "primary_eligible_product_days": coverage.filter(
@@ -1436,6 +1567,17 @@ def run(
         audit_rows,
         infer_schema_length=None,
     ).sort("Date")
+    raw_tape_reconstruction_verified = _verify_raw_tape_reconstruction(
+        paths,
+        manifest,
+        boundary_rows,
+        excursions,
+        product_days,
+        daily_audit,
+    )
+    _assert_input_inventory_current(input_inventory)
+    if _git_state() != git_state:
+        raise ValueError("git state changed during S0 attribution build")
 
     destination = paths.output_root
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1471,7 +1613,6 @@ def run(
                 frame.write_csv(output)
         _write_dual_panel(monthly, stage / "august_attribution_dual_panel.png")
 
-        input_inventory = _input_inventory(paths, selected_dates)
         canonical_checks = _canonical_checks(
             paths,
             requested_dates=dates,
@@ -1480,6 +1621,9 @@ def run(
             git_state=git_state,
             tests=tests,
             input_inventory=input_inventory,
+            raw_tape_reconstruction_verified=(
+                raw_tape_reconstruction_verified
+            ),
         )
         run_config = _run_config(
             paths,
@@ -1504,6 +1648,9 @@ def run(
             membership,
             decomposition,
             daily_audit,
+            raw_tape_reconstruction_verified=(
+                raw_tape_reconstruction_verified
+            ),
         )
         _write_json(stage / "verification.json", verification)
         artifacts = {
@@ -1538,11 +1685,215 @@ def run(
         }
         marker["marker_payload_sha256"] = _canonical_sha256(marker)
         _write_json(stage / "complete.json", marker)
+        verify_bundle(stage, verify_inputs=True)
+        _assert_input_inventory_current(input_inventory)
+        if _git_state() != git_state:
+            raise ValueError("git state changed during staged S0 verification")
         stage.replace(destination)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
     return marker
+
+
+def _verify_raw_tape_reconstruction(
+    paths: AttributionPaths,
+    manifest: pl.DataFrame,
+    boundary_rows: pl.DataFrame,
+    published_excursions: pl.DataFrame,
+    published_product_days: pl.DataFrame,
+    published_daily_audit: pl.DataFrame,
+) -> bool:
+    """Re-read raw inputs and compare reconstructed market facts row for row."""
+
+    dates = manifest["Date"].unique().sort().to_list()
+    audit = published_daily_audit.with_columns(
+        pl.col("Date").cast(pl.String)
+    )
+    raw_audit_columns = (
+        "raw_spot_rows",
+        "raw_future_rows",
+        "spot_explicit_l1_clear_rows",
+        "future_explicit_l1_clear_rows",
+        "raw_residual_change_rows",
+        "primary_residual_change_rows",
+        "primary_eligible_product_days",
+        "session_eligible_product_days",
+        "primary_excursions",
+        "session_sensitivity_excursions",
+    )
+    missing_audit = sorted(set(raw_audit_columns) - set(audit.columns))
+    if missing_audit:
+        raise ValueError(
+            f"published daily raw audit missing columns: {missing_audit}"
+        )
+
+    for index, date in enumerate(dates, start=1):
+        manifest_day = manifest.filter(pl.col("Date") == date)
+        boundary_day = boundary_rows.filter(pl.col("Date") == date)
+        codes = manifest_day["ValueCode"].sort().to_list()
+        batch = load_walkforward_execution_day_batch(
+            date,
+            codes,
+            daily_root=paths.daily_root,
+            boundary_snapshot_path=paths.boundary_path,
+            data_root=paths.data_root,
+            quantiles=(BOUNDARY_QUANTILE,),
+        )
+        raw_spot_rows = batch.raw_tape.spot_states.height
+        raw_future_rows = batch.raw_tape.future_states.height
+        spot_clear_rows = _explicit_l1_clear_rows(
+            batch.raw_tape.spot_states
+        )
+        future_clear_rows = _explicit_l1_clear_rows(
+            batch.raw_tape.future_states
+        )
+        raw_states = build_raw_residual_states(batch, boundary_day)
+        cutoff_ns = _session_second_ns(date, ENTRY_CUTOFF_SECOND)
+        primary_states = raw_states.filter(
+            pl.col("cursor_time_ns") < cutoff_ns
+        )
+        primary_excursions = extract_positive_excursions(
+            primary_states
+        ).with_columns(
+            pl.concat_str(
+                pl.lit("entry_primary"),
+                pl.col("excursion_id"),
+                separator=":",
+            ).alias("excursion_id"),
+            pl.lit("entry_primary").alias("analysis_window"),
+        )
+        session_excursions = extract_positive_excursions(
+            raw_states
+        ).with_columns(
+            pl.concat_str(
+                pl.lit("session_1320_sensitivity"),
+                pl.col("excursion_id"),
+                separator=":",
+            ).alias("excursion_id"),
+            pl.lit("session_1320_sensitivity").alias("analysis_window"),
+        )
+        reconstructed_excursions = pl.concat(
+            [primary_excursions, session_excursions],
+            how="vertical_relaxed",
+        ).sort(
+            ["analysis_window", "Date", "ValueCode", "excursion_sequence"]
+        )
+        published_day_excursions = published_excursions.filter(
+            pl.col("Date").cast(pl.String) == date
+        ).sort(
+            ["analysis_window", "Date", "ValueCode", "excursion_sequence"]
+        )
+        if (
+            reconstructed_excursions.schema
+            != published_day_excursions.schema
+            or not reconstructed_excursions.equals(
+                published_day_excursions,
+                null_equal=True,
+            )
+        ):
+            raise ValueError(f"{date}: raw reconstructed excursions drift")
+
+        primary_counts = primary_states.group_by(
+            "Date", "ValueCode", "QuoteCode"
+        ).agg(
+            pl.col("analysis_eligible_raw")
+            .sum()
+            .cast(pl.Int64)
+            .alias("eligible_raw_state_count")
+        )
+        session_counts = raw_states.group_by(
+            "Date", "ValueCode", "QuoteCode"
+        ).agg(
+            pl.col("analysis_eligible_raw")
+            .sum()
+            .cast(pl.Int64)
+            .alias("session_eligible_raw_state_count")
+        )
+        reconstructed_coverage = (
+            boundary_day.select(
+                "Date",
+                "ValueCode",
+                "QuoteCode",
+                "upper_distance_bp",
+                "lower_distance_bp",
+                "source_asof_date",
+                "history_sessions_global",
+                "history_sessions_product",
+                "lookback_sessions",
+                "parameter_version",
+            )
+            .join(
+                primary_counts,
+                on=["Date", "ValueCode", "QuoteCode"],
+                how="left",
+                validate="1:1",
+            )
+            .join(
+                session_counts,
+                on=["Date", "ValueCode", "QuoteCode"],
+                how="left",
+                validate="1:1",
+            )
+            .with_columns(
+                pl.col("eligible_raw_state_count").fill_null(0),
+                pl.col("session_eligible_raw_state_count").fill_null(0),
+            )
+            .sort(["Date", "ValueCode"])
+        )
+        published_day_coverage = published_product_days.filter(
+            pl.col("Date").cast(pl.String) == date
+        ).sort(["Date", "ValueCode"])
+        if (
+            reconstructed_coverage.schema != published_day_coverage.schema
+            or not reconstructed_coverage.equals(
+                published_day_coverage,
+                null_equal=True,
+            )
+        ):
+            raise ValueError(f"{date}: raw reconstructed coverage drift")
+
+        expected_audit = {
+            "raw_spot_rows": raw_spot_rows,
+            "raw_future_rows": raw_future_rows,
+            "spot_explicit_l1_clear_rows": spot_clear_rows,
+            "future_explicit_l1_clear_rows": future_clear_rows,
+            "raw_residual_change_rows": raw_states.height,
+            "primary_residual_change_rows": primary_states.height,
+            "primary_eligible_product_days": reconstructed_coverage.filter(
+                pl.col("eligible_raw_state_count") > 0
+            ).height,
+            "session_eligible_product_days": reconstructed_coverage.filter(
+                pl.col("session_eligible_raw_state_count") > 0
+            ).height,
+            "primary_excursions": primary_excursions.height,
+            "session_sensitivity_excursions": session_excursions.height,
+        }
+        audit_rows = audit.filter(pl.col("Date") == date)
+        if audit_rows.height != 1:
+            raise ValueError(f"{date}: daily raw audit row is not unique")
+        audit_row = audit_rows.row(0, named=True)
+        if any(
+            int(audit_row[name]) != int(expected)
+            for name, expected in expected_audit.items()
+        ):
+            raise ValueError(f"{date}: daily raw audit reconstruction drift")
+        print(
+            f"[raw verify {index:02d}/{len(dates):02d}] {date}: "
+            f"{reconstructed_excursions.height:,} excursions",
+            flush=True,
+        )
+        del (
+            batch,
+            raw_states,
+            primary_states,
+            primary_excursions,
+            session_excursions,
+            reconstructed_excursions,
+            reconstructed_coverage,
+        )
+        gc.collect()
+    return True
 
 
 def _membership_sensitivity(
@@ -1660,6 +2011,8 @@ def _verify_domain_frames(
     membership: pl.DataFrame,
     decomposition: pl.DataFrame,
     daily_audit: pl.DataFrame,
+    *,
+    raw_tape_reconstruction_verified: bool = False,
 ) -> dict[str, object]:
     """Recompute S0 invariants and every derived summary table."""
 
@@ -2295,6 +2648,16 @@ def _verify_domain_frames(
             for name, value in expected.items()
         ):
             raise ValueError(f"{date}: daily order audit drift")
+    if raw_tape_reconstruction_verified:
+        raw_audit_columns = {
+            "spot_explicit_l1_clear_rows",
+            "future_explicit_l1_clear_rows",
+        }
+        missing_raw_audit = sorted(raw_audit_columns - set(daily_audit.columns))
+        if missing_raw_audit:
+            raise ValueError(
+                f"daily raw-state audit missing columns: {missing_raw_audit}"
+            )
     accepted_fills = raw_orders.filter(
         pl.col("potential_fill_accepted")
     ).height
@@ -2330,7 +2693,15 @@ def _verify_domain_frames(
         "causal_q95_verified": True,
         "left_censor_contract_verified": True,
         "published_excursion_invariants_verified": True,
-        "raw_tape_reconstruction_verified": False,
+        "raw_tape_reconstruction_verified": bool(
+            raw_tape_reconstruction_verified
+        ),
+        "spot_explicit_l1_clear_rows": int(
+            daily_audit["spot_explicit_l1_clear_rows"].sum()
+        ) if raw_tape_reconstruction_verified else None,
+        "future_explicit_l1_clear_rows": int(
+            daily_audit["future_explicit_l1_clear_rows"].sum()
+        ) if raw_tape_reconstruction_verified else None,
         "full_first_touch_working_order_mapping_recomputed": True,
         "touched_order_denominator_recomputed": True,
         "working_interval_contract_verified": True,
@@ -2388,6 +2759,20 @@ def _run_config(
     return {
         "runner_version": RUNNER_VERSION,
         "schema_version": SCHEMA_VERSION,
+        "correction_lineage": {
+            "supersedes_run_id": "august_attribution_s0_20260824_v1",
+            "superseded_runner_version": (
+                "august_attribution_raw_touch_quote_only_v2"
+            ),
+            "reason": (
+                "venue state is forward-filled as a parent struct so a "
+                "genuine same-venue L1 clear remains null"
+            ),
+        },
+        "raw_state_merge_contract": (
+            "only a null opposite-venue parent state inherits; child nulls "
+            "inside a same-venue state are explicit clears"
+        ),
         "diagnostic_quote_only": True,
         "capital_cap_twd": None,
         "capital_cap_infinite": True,
@@ -2511,16 +2896,28 @@ def _input_inventory(
     paths: AttributionPaths,
     dates: Sequence[str],
 ) -> dict[str, object]:
+    boundary_dir = paths.boundary_path.parent
     records: list[dict[str, object]] = [
         _file_inventory(paths.manifest_path, content_hash=True),
         _file_inventory(paths.boundary_path, content_hash=True),
+        _file_inventory(boundary_dir / "complete.json", content_hash=True),
+        _file_inventory(boundary_dir / "config.json", content_hash=True),
+        _file_inventory(
+            boundary_dir / "rolling_boundary_snapshots.csv",
+            content_hash=True,
+        ),
     ]
+    daily_markers = sorted(paths.daily_root.glob("Date=*/complete.json"))
+    records.extend(
+        _file_inventory(marker, content_hash=True) for marker in daily_markers
+    )
     for date in dates:
         daily = paths.daily_root / f"Date={date}"
         for path in (
-            daily / "complete.json",
             daily / "mapping.parquet",
             daily / "causal_fair.parquet",
+            daily / "excursions.parquet",
+            daily / "audit.parquet",
             paths.message_root / f"Date={date}" / "message_events.parquet",
             paths.outcome_root
             / f"Date={date}"
@@ -2554,6 +2951,7 @@ def _canonical_checks(
     git_state: Mapping[str, object],
     tests: Mapping[str, object],
     input_inventory: Mapping[str, object],
+    raw_tape_reconstruction_verified: bool = False,
 ) -> dict[str, bool]:
     records = input_inventory.get("records")
     if not isinstance(records, list):
@@ -2573,6 +2971,7 @@ def _canonical_checks(
             (paths.message_root, DEFAULT_MESSAGE_ROOT),
             (paths.outcome_root, DEFAULT_OUTCOME_ROOT),
             (paths.data_root, HFT_DATA_ROOT),
+            (paths.output_root, DEFAULT_OUTPUT_ROOT),
         )
     )
     return {
@@ -2611,6 +3010,9 @@ def _canonical_checks(
             and len(record["sha256"]) == 64
             for record in records
         ),
+        "raw_tape_reconstruction_verified": bool(
+            raw_tape_reconstruction_verified
+        ),
     }
 
 
@@ -2632,6 +3034,29 @@ def _file_inventory(path: Path, *, content_hash: bool) -> dict[str, object]:
         "content_sha256": content_hash,
         "identity_sha256": identity_sha,
     }
+
+
+def _assert_input_inventory_current(
+    inventory: Mapping[str, object],
+) -> None:
+    """Rehash every input after reconstruction to close the build TOCTOU gap."""
+
+    records = inventory.get("records")
+    if not isinstance(records, list) or not records:
+        raise TypeError("input inventory records are malformed")
+    for record in records:
+        if not isinstance(record, dict):
+            raise TypeError("input inventory record is malformed")
+        path = Path(str(record["path"]))
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"input disappeared during S0 build: {path}")
+        stat = path.stat()
+        if (
+            stat.st_size != int(record["bytes"])
+            or stat.st_mtime_ns != int(record["mtime_ns"])
+            or _sha256_file(path) != record["sha256"]
+        ):
+            raise ValueError(f"input changed during S0 build: {path}")
 
 
 def _run_focused_tests() -> dict[str, object]:
@@ -2715,7 +3140,11 @@ def _artifact_metadata(path: Path) -> dict[str, object]:
     return result
 
 
-def verify_bundle(output_root: Path = DEFAULT_OUTPUT_ROOT) -> Mapping[str, object]:
+def verify_bundle(
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
+    *,
+    verify_inputs: bool = False,
+) -> Mapping[str, object]:
     """Read-only validation of marker, files, hashes, and domain summaries."""
 
     root = Path(output_root)
@@ -2797,6 +3226,8 @@ def verify_bundle(output_root: Path = DEFAULT_OUTPUT_ROOT) -> Mapping[str, objec
         or marker.get("input_inventory_sha256") != inventory_sha256
     ):
         raise ValueError("input inventory digest drift")
+    if verify_inputs:
+        _assert_input_inventory_current(inventory)
 
     manifest_path = Path(run_config["paths"]["manifest_path"])
     manifest_records = [
@@ -2837,6 +3268,33 @@ def verify_bundle(output_root: Path = DEFAULT_OUTPUT_ROOT) -> Mapping[str, objec
             frames[name] = frames[name].with_columns(
                 pl.col("month").cast(pl.String)
             )
+    configured_paths = run_config.get("paths")
+    if not isinstance(configured_paths, dict):
+        raise TypeError("run_config paths are malformed")
+    replay_paths = AttributionPaths(
+        manifest_path=Path(configured_paths["manifest_path"]),
+        boundary_path=Path(configured_paths["boundary_path"]),
+        daily_root=Path(configured_paths["daily_root"]),
+        message_root=Path(configured_paths["message_root"]),
+        outcome_root=Path(configured_paths["outcome_root"]),
+        data_root=Path(configured_paths["data_root"]),
+        output_root=root,
+    )
+    replay_manifest, boundary_rows = load_manifest_and_boundaries(
+        replay_paths.manifest_path,
+        replay_paths.boundary_path,
+        dates=run_config["date_contract"]["dates"],
+    )
+    if not replay_manifest.equals(manifest, null_equal=True):
+        raise ValueError("raw reconstruction manifest drift")
+    raw_tape_reconstruction_verified = _verify_raw_tape_reconstruction(
+        replay_paths,
+        replay_manifest,
+        boundary_rows,
+        frames["market_excursions.parquet"],
+        frames["product_day_coverage.parquet"],
+        frames["daily_input_audit.csv"],
+    )
     verification = _verify_domain_frames(
         manifest,
         frames["product_day_coverage.parquet"],
@@ -2850,15 +3308,23 @@ def verify_bundle(output_root: Path = DEFAULT_OUTPUT_ROOT) -> Mapping[str, objec
         frames["membership_sensitivity.csv"],
         frames["decomposition.csv"],
         frames["daily_input_audit.csv"],
+        raw_tape_reconstruction_verified=(
+            raw_tape_reconstruction_verified
+        ),
     )
     published = json.loads((root / "verification.json").read_text())
     if verification != published or verification != marker.get("verification"):
         raise ValueError("published verification drift")
+    if verify_inputs:
+        _assert_input_inventory_current(inventory)
     return {
         **verification,
+        "canonical_eligible": canonical_eligible,
+        "canonical_checks": canonical_checks,
         "bundle": str(root.resolve()),
         "complete_sha256": _sha256_file(marker_path),
         "marker_payload_sha256": digest,
+        "input_content_rehashed": verify_inputs,
     }
 
 
@@ -2900,9 +3366,16 @@ def main() -> None:
     parser.add_argument("--date", action="append", dest="dates")
     parser.add_argument("--skip-focused-tests", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--verify-inputs", action="store_true")
     args = parser.parse_args()
     if args.verify_only:
-        print(json.dumps(verify_bundle(args.output), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                verify_bundle(args.output, verify_inputs=args.verify_inputs),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
     marker = run(
         AttributionPaths(

@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 
 import polars as pl
 
-SCHEMA_VERSION = "august_attribution_s0_v2"
+SCHEMA_VERSION = "august_attribution_s0_v3"
 
 # Within one receive timestamp, raw state is ingested first, then a potential
 # fill, then cancel effects, and finally a new order becomes working.
@@ -516,11 +516,8 @@ def summarize_monthly_attribution(
         links = touch_links.filter(pl.col("month") == month)
         pairs = pair_source.filter(pl.col("month") == month)
         supported_links = links.filter(pl.col("queue_denominator_supported"))
-        pd_rates = (
-            supported_links.group_by("Date", "ValueCode")
-            .agg(pl.col("post_touch_fill").mean().alias("rate"))
-            if not supported_links.is_empty()
-            else pl.DataFrame(schema={"Date": pl.String, "ValueCode": pl.String, "rate": pl.Float64})
+        pd_equal_rate, pd_equal_count = _product_day_equal_fill_rate(
+            supported_links
         )
         touched_pd = primary_touches.select("Date", "ValueCode").unique().height
         sensitivity_touched_pd = (
@@ -614,13 +611,11 @@ def summarize_monthly_attribution(
                     post_touch_fills, supported_touch_orders
                 ),
                 "post_touch_fill_rate_product_day_equal": (
-                    float(pd_rates["rate"].mean())
-                    if not pd_rates.is_empty()
-                    else None
+                    pd_equal_rate
                 ),
-                "product_days_in_queue_equal_weight": pd_rates.height,
+                "product_days_in_queue_equal_weight": pd_equal_count,
                 "product_days_without_supported_touched_orders": (
-                    product_day_count - pd_rates.height
+                    product_day_count - pd_equal_count
                 ),
             }
         )
@@ -648,9 +643,9 @@ def summarize_post_touch_by_rank(touch_links: pl.DataFrame) -> pl.DataFrame:
         ["month", "exact_target_rank"], maintain_order=True
     ):
         supported = group.filter(pl.col("queue_denominator_supported"))
-        pd_rates = supported.group_by("Date", "ValueCode").agg(
-            pl.col("post_touch_fill").mean().alias("rate")
-        ) if not supported.is_empty() else pl.DataFrame({"rate": []}, schema={"rate": pl.Float64})
+        pd_equal_rate, pd_equal_count = _product_day_equal_fill_rate(
+            supported
+        )
         numerator = int(supported["post_touch_fill"].sum() or 0) if not supported.is_empty() else 0
         rows.append(
             {
@@ -663,14 +658,36 @@ def summarize_post_touch_by_rank(touch_links: pl.DataFrame) -> pl.DataFrame:
                 "post_touch_fills": numerator,
                 "post_touch_fill_rate_pooled": _ratio(numerator, supported.height),
                 "post_touch_fill_rate_product_day_equal": (
-                    float(pd_rates["rate"].mean()) if not pd_rates.is_empty() else None
+                    pd_equal_rate
                 ),
-                "product_days": pd_rates.height,
+                "product_days": pd_equal_count,
             }
         )
     return pl.from_dicts(rows, infer_schema_length=None).sort(
         ["month", "exact_target_rank"]
     )
+
+
+def _product_day_equal_fill_rate(
+    supported_links: pl.DataFrame,
+) -> tuple[float | None, int]:
+    """Compute an order-independent mean of exact integer product-day rates."""
+
+    if supported_links.is_empty():
+        return None, 0
+    counts = (
+        supported_links.group_by("Date", "ValueCode")
+        .agg(
+            pl.len().alias("denominator"),
+            pl.col("post_touch_fill").sum().alias("numerator"),
+        )
+        .sort(["Date", "ValueCode"])
+    )
+    rates = [
+        int(row["numerator"]) / int(row["denominator"])
+        for row in counts.iter_rows(named=True)
+    ]
+    return math.fsum(rates) / len(rates), len(rates)
 
 
 def build_decomposition(monthly: pl.DataFrame) -> pl.DataFrame:
