@@ -137,6 +137,24 @@ def prepare_fair_panel(
     primary_age_ms: int | None = None,
 ) -> pl.DataFrame:
     """Create an ordered candidate/label panel from causal basis landmarks."""
+    return add_forward_labels(
+        prepare_causal_fair_panel(
+            landmarks,
+            primary_age_ms=primary_age_ms,
+        )
+    )
+
+
+def prepare_causal_fair_panel(
+    landmarks: pl.DataFrame,
+    primary_age_ms: int | None = None,
+) -> pl.DataFrame:
+    """Create anchors and eligibility without materialising future labels.
+
+    This is the scalable daily input for rolling boundaries and raw quote
+    replay.  The pilot scorer can call :func:`prepare_fair_panel` when forward
+    evaluation labels are actually required.
+    """
     eligible_column = (
         "eligible_base" if primary_age_ms is None else f"eligible_{primary_age_ms}ms"
     )
@@ -157,5 +175,4 @@ def prepare_fair_panel(
             & (pl.col("seconds_from_open") >= 300)
         ).alias("analysis_eligible"),
     )
-    panel = add_anchor_candidates(panel)
-    return add_forward_labels(panel)
+    return add_anchor_candidates(panel)

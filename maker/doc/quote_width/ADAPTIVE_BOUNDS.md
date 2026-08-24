@@ -6,7 +6,7 @@
 
 正式策略不使用固定 `10／15／20 bp`，也不把固定 `1／2 tick` 當成商品的永久參數。這些格點只保留作回歸形狀、coverage 與程式正確性的 diagnostic controls。
 
-D 日真正的 latent boundary prior 由 D−1 同商品、同一個 D 日目標合約估計，而且正負側分開：
+本文件的八日 pilot 以 D−1 同商品、同一個 D 日目標合約估計 latent boundary，而且正負側分開：
 
 ```text
 M_t      = causal EWMA120 fair-mid
@@ -17,7 +17,9 @@ U_t      = M_t + W+_q
 L_t      = M_t - W-_q
 ```
 
-`p50／p80` 是第一版 prior candidates；`p95` 只作 tail diagnostic。它們是 empirical first-passage boundaries，不是常態分布的信賴區間，也不要求上下對稱。
+這個 D−1 版本現在只保留作 baseline。全市場 production-like 研究改用 [WALK_FORWARD.md](../WALK_FORWARD.md) 的最近 60 個交易日 pooled excursion distribution，每日只以 `<D` 資料更新；更新演算法固定，不再把單一昨日當正式商品參數。
+
+`p50／p80` 是用來描述與初始化距離格網的 prior landmarks；`p95` 只作 tail diagnostic。它們不是策略直接選擇的掛價，也不是常態分布的信賴區間。
 
 本文件的機率只描述 1 秒 latent price path。它還沒有 maker fill、50 ms hedge、費稅或 EV，不能直接拿來下單。
 
@@ -92,10 +94,26 @@ Branches 至少分 `target_exit_same_day`、`force_flat_same_day`、`overnight/u
 D 日開盤前 product prior snapshot（state-conditioned challenger 待實作）
 -> 盤中 causal fair、spread、volatility、freshness state
 -> 每條 route 枚舉當下合法 maker tick prices
--> 反算每個 action 的 effective W+ / W-
--> 查詢／shrink 對應機率與 branch cost
+-> 枚舉合法 entry tick × exit tick 組合
+-> 反算每個 action pair 的 effective W+ / W- 與 gross tick capture
+-> 查詢／shrink entry fill、同日 exit、overnight與各 branch cost
 -> 風控後選擇最高 OOS EV 的 action
 ```
+
+也就是最終表不是「商品選 p50 還是 p80」，而是一張商品／causal state 的 action surface：
+
+```text
+row key:
+    product, entry route, entry maker ticks/price,
+    exit route, exit maker ticks/price, state, time horizon
+
+values:
+    P(entry fill), P(exit same day | hedged fill),
+    P(carry overnight), fill/hedge/top-up/carry branch cashflows,
+    joint net EV and support
+```
+
+Tick 差決定每個 terminal branch 能拿到的 gross capture，機率決定各 branch 權重；實作以逐路徑 joint cashflow估 EV，避免把相依的邊際機率天真相乘。p50／p80只幫助確認格網涵蓋正常與尾端發散，不限制 optimizer。
 
 Raw replay fact 的核心 identity 是 `episode start + product + route + stage + rounded_target_price + qty + replay version`。Fair／boundary policy 是 many-to-one alias；多個 nominal thresholds 落到同一價格時只能共用同一筆 queue／fill fact。
 

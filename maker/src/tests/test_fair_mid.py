@@ -13,10 +13,17 @@ from ..fair_mid.anchors import add_anchor_candidates, prepare_fair_panel
 from ..fair_mid.metrics import summarize_fresh_endpoint_reversion
 from ..fair_mid.level_stability import analyze_level_stability
 from ..fair_mid.prior_day import add_prior_candidates, summarize_prior_landmarks
-from ..fair_mid.quote_churn import round_down_to_tick, round_up_to_tick
+from ..fair_mid.quote_churn import (
+    price_to_tick_index,
+    round_down_to_tick,
+    round_up_to_tick,
+)
 from ..quote_width.table import (
     _group_excursions,
+    _next_tick,
     _outcome_at_horizon,
+    _previous_tick,
+    add_reference_tick_columns,
     add_microstructure_columns,
     summarize_entry_route_geometry,
 )
@@ -261,11 +268,97 @@ class TickRoundingTest(unittest.TestCase):
         self.assertEqual(frame["down"].to_list(), [9.99, 10.0, 49.95, 50.0, 99.9, 100.0])
         self.assertEqual(frame["up"].to_list(), [10.0, 10.05, 50.0, 50.1, 100.0, 100.5])
 
+    def test_polars_future_ladder_switches_on_20260706_but_spot_does_not(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "Date": ["20260703", "20260706"],
+                "price": [2131.0, 2131.0],
+                "legal_base": [2130.0, 2130.0],
+                "upper_base": [2135.0, 2135.0],
+            }
+        ).select(
+            price_to_tick_index(
+                pl.col("price"),
+                market="future",
+                session_date=pl.col("Date"),
+            ).alias("future_index"),
+            price_to_tick_index(
+                pl.col("price"),
+                market="spot",
+                session_date=pl.col("Date"),
+            ).alias("spot_index"),
+            round_up_to_tick(
+                pl.col("legal_base") + 0.1,
+                market="future",
+                session_date=pl.col("Date"),
+            ).alias("future_round_up"),
+            round_up_to_tick(
+                pl.col("legal_base") + 0.1,
+                market="spot",
+                session_date=pl.col("Date"),
+            ).alias("spot_round_up"),
+            _next_tick(
+                pl.col("legal_base"),
+                market="future",
+                session_date=pl.col("Date"),
+            ).alias("future_next"),
+            _next_tick(
+                pl.col("legal_base"),
+                market="spot",
+                session_date=pl.col("Date"),
+            ).alias("spot_next"),
+            _previous_tick(
+                pl.col("upper_base"),
+                market="future",
+                session_date=pl.col("Date"),
+            ).alias("future_previous"),
+            _previous_tick(
+                pl.col("upper_base"),
+                market="spot",
+                session_date=pl.col("Date"),
+            ).alias("spot_previous"),
+        )
+        self.assertAlmostEqual(frame.item(0, "future_index"), 3826.2)
+        self.assertEqual(frame.item(1, "future_index"), 4731.0)
+        # Spot 2131 remains off-ladder on both dates (fractional index).
+        self.assertAlmostEqual(frame.item(0, "spot_index"), 3826.2)
+        self.assertAlmostEqual(frame.item(1, "spot_index"), 3826.2)
+        self.assertEqual(frame["future_round_up"].to_list(), [2135.0, 2131.0])
+        self.assertEqual(frame["spot_round_up"].to_list(), [2135.0, 2135.0])
+        self.assertEqual(frame["future_next"].to_list(), [2135.0, 2131.0])
+        self.assertEqual(frame["spot_next"].to_list(), [2135.0, 2135.0])
+        self.assertEqual(frame["future_previous"].to_list(), [2130.0, 2134.0])
+        self.assertEqual(frame["spot_previous"].to_list(), [2130.0, 2130.0])
+
+    def test_reference_future_tick_bp_uses_target_date_ladder(self) -> None:
+        result = add_reference_tick_columns(
+            pl.DataFrame(
+                {
+                    "Date": ["20260703", "20260706"],
+                    "spot_ref_price": [2130.0, 2130.0],
+                    "fut_ref_price": [2130.0, 2130.0],
+                }
+            )
+        )
+        self.assertAlmostEqual(
+            result.item(0, "target_ref_future_tick_bp"),
+            10_000 * 5 / 2130,
+        )
+        self.assertAlmostEqual(
+            result.item(1, "target_ref_future_tick_bp"),
+            10_000 * 1 / 2130,
+        )
+        self.assertEqual(
+            result["target_ref_future_tick_bp"].to_list(),
+            result["target_ref_future_ask_tick_bp"].to_list(),
+        )
+
 
 class WidthTableTest(unittest.TestCase):
     def test_microstructure_scales_keep_tick_bp_and_spread_ticks_separate(self) -> None:
         frame = pl.DataFrame(
             {
+                "Date": ["20260128"],
                 "spot_bid": [99.9],
                 "spot_ask": [100.0],
                 "fut_bid": [100.0],

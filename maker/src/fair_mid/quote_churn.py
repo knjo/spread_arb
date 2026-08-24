@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import polars as pl
 
@@ -11,12 +12,18 @@ from ..common.landmarks import (
     REF_LOWER_RETURN,
     REF_UPPER_RETURN,
 )
+from ..quote_fill.targets import (
+    FUTURE_ONE_DOLLAR_TICK_EFFECTIVE_DATE,
+    PRICE_LADDER_VERSION,
+)
 from .anchors import ANCHOR_COLUMNS, GROUP_KEYS
 from .metrics import MODEL_NAMES
 
 
 DEFAULT_DIAGNOSTIC_OPEN_WIDTH_BP = 20.0
 PRICE_EPS = 1e-10
+PriceMarket = Literal["spot", "future"]
+SessionDateExpr = pl.Expr | str | None
 
 
 @dataclass(frozen=True)
@@ -25,60 +32,160 @@ class QuoteChurnResult:
     by_day_symbol_route: pl.DataFrame
 
 
-def price_to_tick_index(price: pl.Expr) -> pl.Expr:
-    """Map a Taiwan equity-style price ladder to a continuous tick index."""
+def _high_price_boundary(
+    *,
+    market: PriceMarket,
+    session_date: SessionDateExpr,
+) -> pl.Expr:
+    """Return the versioned high-price boundary for a Polars expression.
+
+    A missing date intentionally retains the legacy ladder for backwards
+    compatible spot-only diagnostics.  Every futures caller in this module
+    and :mod:`quote_width.table` passes the row's explicit ``Date``.
+    """
+
+    if market == "spot":
+        return pl.lit(1000.0)
+    if market != "future":
+        raise ValueError(f"unknown price market: {market}")
+    if session_date is None:
+        return pl.lit(1000.0)
+    if isinstance(session_date, str):
+        if len(session_date) != 8 or not session_date.isdigit():
+            raise ValueError("session_date must be YYYYMMDD")
+        date = pl.lit(session_date)
+    else:
+        date = session_date
+    # Casting also supports Date-typed columns; remove ISO separators before
+    # comparing with the authoritative YYYYMMDD effective-date constant.
+    post_change = (
+        date.cast(pl.String).str.replace_all("-", "")
+        >= FUTURE_ONE_DOLLAR_TICK_EFFECTIVE_DATE
+    ).fill_null(False)
+    return pl.when(post_change).then(pl.lit(2500.0)).otherwise(pl.lit(1000.0))
+
+
+def price_to_tick_index(
+    price: pl.Expr,
+    *,
+    market: PriceMarket = "spot",
+    session_date: SessionDateExpr = None,
+) -> pl.Expr:
+    """Map the versioned Taiwan spot/stock-future ladder to a tick index."""
+
+    value = price.cast(pl.Float64)
+    high_price_boundary = _high_price_boundary(
+        market=market,
+        session_date=session_date,
+    )
+    high_price_index = 3100.0 + (high_price_boundary - 500.0)
     return (
-        pl.when(price < 10)
-        .then(price / 0.01)
-        .when(price < 50)
-        .then(1000 + (price - 10) / 0.05)
-        .when(price < 100)
-        .then(1800 + (price - 50) / 0.1)
-        .when(price < 500)
-        .then(2300 + (price - 100) / 0.5)
-        .when(price < 1000)
-        .then(3100 + (price - 500) / 1.0)
-        .otherwise(3600 + (price - 1000) / 5.0)
+        pl.when(value < 10.0)
+        .then(value / 0.01)
+        .when(value < 50.0)
+        .then(1000.0 + (value - 10.0) / 0.05)
+        .when(value < 100.0)
+        .then(1800.0 + (value - 50.0) / 0.1)
+        .when(value < 500.0)
+        .then(2300.0 + (value - 100.0) / 0.5)
+        .when(value < high_price_boundary)
+        .then(3100.0 + (value - 500.0))
+        .otherwise(high_price_index + (value - high_price_boundary) / 5.0)
     )
 
 
-def tick_index_to_price(index: pl.Expr) -> pl.Expr:
-    """Invert an integer Taiwan equity-style tick index."""
+def tick_index_to_price(
+    index: pl.Expr,
+    *,
+    market: PriceMarket = "spot",
+    session_date: SessionDateExpr = None,
+) -> pl.Expr:
+    """Invert a tick index under the same versioned ladder."""
+
+    value = index.cast(pl.Float64)
+    high_price_boundary = _high_price_boundary(
+        market=market,
+        session_date=session_date,
+    )
+    high_price_index = 3100.0 + (high_price_boundary - 500.0)
     return (
-        pl.when(index < 1000)
-        .then(index * 0.01)
-        .when(index < 1800)
-        .then(10 + (index - 1000) * 0.05)
-        .when(index < 2300)
-        .then(50 + (index - 1800) * 0.1)
-        .when(index < 3100)
-        .then(100 + (index - 2300) * 0.5)
-        .when(index < 3600)
-        .then(500 + (index - 3100) * 1.0)
-        .otherwise(1000 + (index - 3600) * 5.0)
+        pl.when(value < 1000.0)
+        .then(value * 0.01)
+        .when(value < 1800.0)
+        .then(10.0 + (value - 1000.0) * 0.05)
+        .when(value < 2300.0)
+        .then(50.0 + (value - 1800.0) * 0.1)
+        .when(value < 3100.0)
+        .then(100.0 + (value - 2300.0) * 0.5)
+        .when(value < high_price_index)
+        .then(500.0 + (value - 3100.0))
+        .otherwise(
+            high_price_boundary + (value - high_price_index) * 5.0
+        )
     )
 
 
-def round_up_to_tick(price: pl.Expr) -> pl.Expr:
-    index = (price_to_tick_index(price) - PRICE_EPS).ceil()
-    return tick_index_to_price(index)
+def round_up_to_tick(
+    price: pl.Expr,
+    *,
+    market: PriceMarket = "spot",
+    session_date: SessionDateExpr = None,
+) -> pl.Expr:
+    index = (
+        price_to_tick_index(
+            price,
+            market=market,
+            session_date=session_date,
+        )
+        - PRICE_EPS
+    ).ceil()
+    return tick_index_to_price(
+        index,
+        market=market,
+        session_date=session_date,
+    )
 
 
-def round_down_to_tick(price: pl.Expr) -> pl.Expr:
-    index = (price_to_tick_index(price) + PRICE_EPS).floor()
-    return tick_index_to_price(index)
+def round_down_to_tick(
+    price: pl.Expr,
+    *,
+    market: PriceMarket = "spot",
+    session_date: SessionDateExpr = None,
+) -> pl.Expr:
+    index = (
+        price_to_tick_index(
+            price,
+            market=market,
+            session_date=session_date,
+        )
+        + PRICE_EPS
+    ).floor()
+    return tick_index_to_price(
+        index,
+        market=market,
+        session_date=session_date,
+    )
 
 
 def _target_price(
     route: str,
     anchor: pl.Expr,
     open_width_bp: float,
+    session_date: pl.Expr,
 ) -> pl.Expr:
     threshold_multiplier = 1 + (anchor + open_width_bp) / 10_000
     if route == "future_ask_spot_taker":
-        return round_up_to_tick(pl.col("spot_ask") * threshold_multiplier)
+        return round_up_to_tick(
+            pl.col("spot_ask") * threshold_multiplier,
+            market="future",
+            session_date=session_date,
+        )
     if route == "spot_bid_future_taker":
-        return round_down_to_tick(pl.col("fut_exec_bid") / threshold_multiplier)
+        return round_down_to_tick(
+            pl.col("fut_exec_bid") / threshold_multiplier,
+            market="spot",
+            session_date=session_date,
+        )
     raise ValueError(f"unknown route: {route}")
 
 
@@ -110,8 +217,18 @@ def _route_frame(
     )
     frame = panel.with_columns(
         previous_anchor.alias("previous_anchor_bp"),
-        _target_price(route, pl.col(anchor_column), open_width_bp).alias("target_price"),
-        _target_price(route, previous_anchor, open_width_bp).alias(
+        _target_price(
+            route,
+            pl.col(anchor_column),
+            open_width_bp,
+            pl.col("Date"),
+        ).alias("target_price"),
+        _target_price(
+            route,
+            previous_anchor,
+            open_width_bp,
+            pl.col("Date"),
+        ).alias(
             "target_with_previous_anchor"
         ),
     )
@@ -206,6 +323,9 @@ def summarize_quote_churn(
     by_model_route = (
         long.group_by(["model", "route", "open_width_bp"])
         .agg(_aggregations())
+        .with_columns(
+            pl.lit(PRICE_LADDER_VERSION).alias("price_ladder_version")
+        )
         .sort(["model", "route"])
     )
     by_day_symbol_route = (
@@ -213,6 +333,9 @@ def summarize_quote_churn(
             ["model", "route", "open_width_bp", "Date", "ValueCode", "QuoteCode"]
         )
         .agg(_aggregations())
+        .with_columns(
+            pl.lit(PRICE_LADDER_VERSION).alias("price_ladder_version")
+        )
         .sort(["model", "route", "Date", "ValueCode"])
     )
     return QuoteChurnResult(

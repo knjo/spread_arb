@@ -13,6 +13,11 @@ from .paths import DEFAULT_OUTPUT_ROOT, RESEARCH_ROOT, market_data_path, parse_d
 
 STANDARD_CONTRACT_SIZE = 2000.0
 CONTRACT_SIZE_EPS = 1e-6
+# Both maker entry routes buy the spot leg first and sell it on exit.  ``Y``
+# names that permit buy-then-sell therefore belong in this research universe;
+# restricting the loader to ``X`` silently dropped products such as 2603 on
+# otherwise valid sessions.  ``N`` remains excluded from the same-day branch.
+SPOT_BUY_FIRST_ELIGIBLE_MARKS = ("X", "Y")
 
 
 def _load_futures_basic_from_existing_loader(date: str) -> pl.DataFrame:
@@ -103,7 +108,9 @@ def load_spot_reference(date: str) -> pl.DataFrame:
             pl.col("ins_type").cast(pl.String),
         )
         .filter(
-            (pl.col("day_trade_mark").str.to_uppercase() == "X")
+            pl.col("day_trade_mark")
+            .str.to_uppercase()
+            .is_in(SPOT_BUY_FIRST_ELIGIBLE_MARKS)
             & pl.col("spot_ref_price").is_not_null()
             & (pl.col("spot_ref_price") > 0)
         )

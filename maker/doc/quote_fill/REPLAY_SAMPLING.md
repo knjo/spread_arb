@@ -10,7 +10,7 @@
 2. 同一個 spread epoch、route、stage、絕對掛價最多建立一次；B1／B2 只是會隨行情改變的狀態，不是訂單 ID。
 3. target 往較不積極方向退回時，撤掉比新 target 更積極的 working orders；較保守的舊層繼續保留。
 4. 第一版 executable replay 假設撤單立即成功；同時保存撤單需求、丟棄的 queue age，以及撤單後的 shadow tape，供後續 cancel-latency sensitivity 使用。
-5. 多層訂單共享同一段成交量、hedge depth、庫存與風險上限，不能把每一層當成互相獨立的 Bernoulli 樣本。
+5. WP02 第一階段允許每個合格 order generation 依既有 maker-fill state 獨立產生研究 label，用來估條件期望值；同日／同 Pair 的事件仍共享行情，統計推論不得當成 IID。成交量、hedge depth、庫存與部位守恆延後到 portfolio replay。
 
 本文件只定義 WP02 的取樣與 order lifecycle。50 ms hedge、費稅與 portfolio EV 分別由 WP03–05 負責。
 
@@ -75,14 +75,14 @@ reserved_quantity
 | 事件 | 動作 |
 |---|---|
 | 新 `spread_pair_epoch` | 允許評估一個新的 base intent；epoch 本身不強迫取消舊單 |
-| target 與現有 working price 相同 | 重用原 order，不重掛、不重排 queue |
+| 同一 epoch，target 與已建立價格相同 | 不新增，記 `same_price_suppressed` |
 | 同 epoch target 往前到未見過的新絕對價 | 新增一層，所有較保守舊層繼續 working |
 | 同 epoch 重複到已見過價格 | 記 `same_price_suppressed`，不新增 order |
 | target 退後 | 撤掉比新 target 更積極的 layers；保留等價與較保守 layers；同 epoch 不在退後價重開新樣本 |
 | RefPrice／TrialMatch／book／risk gate 失效 | 撤掉該 gate 涵蓋的所有 layers，停止新掛 |
 | cutoff／日終 | 撤掉所有 leaves，結束當日 replay |
 
-新 epoch 若某絕對價已有跨 epoch 存活的實體 order，只建立新的 opportunity alias 指向舊 order，不再送一張同價單。舊 order 已 terminal 時，新 epoch 才能建立新的 order generation。若未來真的要同價加量，必須另定 qty／queue policy，不能用「新樣本」偷偷實作。
+新 epoch 代表新的研究 admission。即使某絕對價已有跨 epoch 存活 order，也建立新的 order generation／樣本；同價去重只限制在同一 `spread_pair_epoch`。因此跨 epoch 同價可以同時存在多筆研究 orders，各自使用起始 maker-fill state 估 outcome。是否真的同時送出全部數量、後單是否計入前面自己的 leaves，以及總部位上限，延後在 portfolio replay 加入，不回頭改寫 WP02 的自然樣本表。
 
 ### Spot Bid 範例
 
@@ -102,8 +102,8 @@ t3  epoch=21，target 退回 100
     -> O1@100 繼續 working，不重掛 100
 
 t4  epoch=22，target=100
-    -> 若 O1 仍 working，只新增 alias，不增加同價實體單
-    -> 若 O1 已 terminal，可建新的 generation
+    -> 不論 O1 是否仍 working，epoch 更新允許建 O3@100
+    -> O3 是新的研究 generation；最終 portfolio replay 才套 qty／own-order queue／position cap
 ```
 
 Ask maker 完全鏡像：target 向下是往前，target 向上是退後。
@@ -118,17 +118,18 @@ Ask maker 完全鏡像：target 向下是往前，target 向上是退後。
 
 2. `candidate_intent`
    - 一個 qualifying epoch 或同 epoch 新前方價位一列。
-   - outcome：`submitted / reused_existing / same_price_suppressed / capacity_blocked / gated`。
+   - outcome：`admitted / same_price_suppressed / gated`；capacity 不在 WP02 自然樣本表刪資料。
    - 去重 key：
 
    ```text
    Date, ValueCode, QuoteCode, route, stage,
-   spread_pair_epoch, maker_side, absolute_maker_price,
-   intended_qty, intent_policy_version
+   spread_pair_epoch, maker_side, absolute_maker_price_tick
    ```
 
+   `intended_qty`、fair／boundary／width policy 不在 raw intent identity；它們放在 many-to-one alias。Raw fact先保存 stop 前的 `fillable_qty_path`，再由各 qty／policy派生結果，避免同價重播多次。
+
 3. `physical_order`
-   - 一次真正 submit 的 order generation 一列，是 fill probability 的 order-level 分母。
+   - WP02 中是一次 independent research order generation 一列，是條件 fill 表的 order-level 分母；不表示 WP05 必然同時送出全部 generations。
    - raw replay key：
 
    ```text
@@ -137,13 +138,15 @@ Ask maker 完全鏡像：target 向下是往前，target 向上是退後。
    intended_qty, order_generation, queue_replay_version
    ```
 
+   必帶 `independent_event_label=true`；只有 WP05 joint replay 後才能標 `executable_portfolio_order=true`。
+
 4. `order_state_spell`
    - 同一 order 只在狀態改變時新增 interval，例如 `CURRENT -> AWAY_1 -> AWAY_2 -> CANCELLED`。
    - 每列保存當時 rank、queue ahead、target distance、fair、反腿價格與 causal state。
    - 用於 time-varying hazard，不當成獨立 physical order。
 
 5. `fill_delta`
-   - 每次新增 partial／full filled quantity 一列，所有同時存活 layers 依價格時間優先共同消耗 tape 成交量。
+   - 每次新增 partial／full filled quantity 一列。WP02 的 independent-event table 各自依起始 maker-fill state 標記；另帶 cohort／date keys，避免把共享行情誤當 IID。
 
 6. `hedge_fact`
    - 每個 incremental maker fill 對應 `fill_recv_time + 50 ms` 的 hedge child；若策略會 batch，需先合併 pending quantity再掃一次共同 book depth。
@@ -178,9 +181,11 @@ V0 在 retreat tick 的 causal `RecvTime` 立即讓 leaves terminal，之後的�
 
 主動撤單是 competing terminal outcome，不是資料 censor；只有缺檔、raw sequence 中斷或無法判定 queue 才標 unknown／censored。
 
-## 多層共同資源
+## Independent-event table 與共同資源
 
-同一路徑上的 active layers 不是獨立 counterfactual：
+WP02 主表先回答「若這個 Pair／價位送出一單，條件 fill／cancel／hedge cost 表現如何」，允許跨 Pair 同價各自形成事件。這符合先用樣本估期望值、最後才決定部位控制的研究順序。
+
+但同一路徑上的 active layers 在統計與最終實盤並非完全獨立：
 
 - 同一筆市場成交量只能依價格時間優先分配一次。
 - 同價舊 order 的未成交 leaves 必須排在較晚 generation 前面。
@@ -188,7 +193,12 @@ V0 在 retreat tick 的 causal `RecvTime` 立即讓 leaves terminal，之後的�
 - cancel request 在真實 latency 版本中，要到 cancel effective 才釋放 reservation。
 - 多筆 maker fill 的 50 ms hedge 會共享同一時點的 taker depth。
 
-研究可另輸出 unconstrained opportunity diagnostics，但 executable fill／EV 必須套 inventory cap。否則「保留 B2 再掛 B1」只是把最大可能曝險放大，不是免費增加樣本。
+因此輸出分開標記：
+
+- `independent_event_estimate=true`：WP02 機率／成本研究表，不套部位上限。
+- `joint_portfolio_replay=true`：WP05 才依實際政策套 own-order priority、共同成交量、hedge depth、qty 與 inventory cap。
+
+兩者不可混稱；但 WP02 不因最後尚未決定部位控制而刪掉合格樣本。
 
 ## 最低統計輸出
 
@@ -198,11 +208,11 @@ V0 在 retreat tick 的 causal `RecvTime` 立即讓 leaves terminal，之後的�
 eligible_intents
 physical_orders_started
 same_price_suppression_rate
-reused_cross_epoch_order_rate
+cross_epoch_same_price_generation_rate
 new_forward_layer_rate
 orders_per_spread_epoch
 active_layers time-weighted p50/p95/max
-reserved_qty / capacity_block_rate
+same_market_path_cluster_size
 ```
 
 ### 撤單與 queue 浪費

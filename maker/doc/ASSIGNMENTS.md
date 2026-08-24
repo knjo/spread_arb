@@ -7,9 +7,10 @@
 | 01B | Cross-product diagnostic grids | WP01 | D−1 parameters、excursions、next-day validation | 八日／四商品 latent-path pilot 完成；固定 BP／tick 不進 optimizer |
 | 01C | Fixed-grid latent cycles | WP01B | non-overlap FSM、center／lower sensitivity | 八日／四商品 diagnostic 完成；非 execution shortlist |
 | 01D | Adaptive asymmetric boundaries | WP01B、WP01C | D−1 safe snapshot、upper/lower reach 與 conditional reversion | 八日／四商品 latent pilot 完成；非 fill／EV |
-| 02 | Quote episode 與 maker fill | WP00、WP01、WP01D | SpreadPair epoch、layered rounded-target orders、competing-risk labels | 取樣／撤單契約已凍結；raw replay 未開始 |
-| 03 | 固定 50 ms hedge | WP00、WP02 | route cost labels | 未開始 |
-| 04 | Action EV 與完整 cycle | WP01–03 | calibrated policy frontier | 未開始 |
+| 02 | Quote episode 與 maker fill | WP00、WP01、WP01D | SpreadPair epoch、layered rounded-target orders、competing-risk labels | 八日／四商品 independent-event raw pilot 完成；待 full-2026／joint allocation |
+| 03 | 固定 50 ms hedge | WP00、WP02 | route cost labels | Entry 兩 routes 50 ms pilot 完成；exit hedge待做 |
+| 04 | Action EV 與完整 cycle | WP01–03 | calibrated policy frontier | Actual-fill conditional latent exit完成；executable exit／overnight／net EV待做 |
+| WF | Rolling table、流動性 universe 與 walk-forward validation | WP01D–04 | 60-session daily snapshots、route-specific liquidity screen、frozen predictions、pseudo／forward OOS | 131 日 latent facts、rolling bounds與liquidity screen完成；full-market execution／EV與新資料locked forward待做 |
 | 05 | Portfolio replay | WP04 | OOS turnover／PnL／risk | 未開始 |
 | 06 | Shadow calibration | WP02–05 | queue／latency calibration | 未開始 |
 

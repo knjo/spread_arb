@@ -9,6 +9,7 @@ data/
 ├── fair_mid/
 ├── quote_width/
 ├── quote_fill/
+├── walkforward/
 ├── hedge_50ms/
 └── backtest/
 ```
@@ -43,3 +44,32 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `quote_width/cycle/` | 固定格點的獨立 latent position FSM 與 diagnostic summaries |
 | `quote_width/adaptive/` | D−1 safe parameter snapshot，以及分開標示的 retrospective reach／reversion validation |
 | `quote_fill/` | SpreadPair epoch、candidate intents、physical orders、state spells、partial fills與撤單／queue replay diagnostics |
+
+`quote_fill/` 目前的八日 pilot 產物：
+
+| 產物 | 用途 |
+|---|---|
+| `target_observations.parquet` | Raw 期現 state-change 上的 adaptive target／gate／queue observation |
+| `order_aliases.parquet` | q50／q80 policy-specific working window、fill／cancel與shadow labels |
+| `raw_order_facts.parquet` | 同 submit／route／絕對價去重後的 raw replay identity |
+| `fill_by_day_symbol.csv`, `fill_summary.csv` | Natural-base-rate fill／partial／cancel tables |
+| `fill_by_rank.csv`, `fill_terminal_summary.csv` | Submit rank與 competing terminal diagnostics |
+| `makerfill_sanity*` | 既有現貨 makerFill 與 moving-policy raw replay對照 |
+| `spot_partial_completion.csv` | 第一 lot 後於50ms–5s累積兩 lots 的可判定樣本率 |
+| `hedge_facts.parquet`, `hedge_summary.csv` | Unique raw full-fill後 50 ms 反腿 L1–L5 cost |
+| `latent_exit_opportunity_*` | Actual full-fill 後的 1秒／30秒 latent first-passage；非 execution |
+| `action_research_summary.csv` | Fill、hedge、latent exit 串接骨架；`ev_ready=false` |
+| `product_action_research_table.csv` | 商品×route×q 的 rounded band、fill、hedge與latent lower面板；`ev_ready=false` |
+
+`walkforward/` 使用可續跑的日分區：`daily/Date=YYYYMMDD/` 保存 causal fair、excursions、point-in-time mapping 與 audit；`rolling_boundaries/` 保存只使用 `<D` 最近 60 個交易日的上下界；`liquidity/` 保存日級 A1-B1 spread／depth／freshness facts 與 route-specific raw-replay screen。Execution probability facts完成後，`quote_fill/walkforward/` 再保存 product／state 與 route-state parent 的每日 snapshot。所有 snapshot 必須帶 `train_start/end`、`label_cutoff`、版本及 `contains_target_day_outcome=false`。
+
+`walkforward/liquidity/` 的主要產物：
+
+| 產物 | 用途 |
+|---|---|
+| `daily_liquidity.parquet` | 131 日商品級 spread／freshness／depth／activity收盤後 facts |
+| `rolling_liquidity_screen.parquet` | 每日只用 `<D` 歷史建立的 q50／q80／q95 route screen |
+| `latest_q50_route_screen.csv` | 最新日 funnel 與 replay tier |
+| `pseudo_validation_route_stability.csv` | Jul-Aug route stability；retrospective only |
+| `pseudo_validation_stable_core_products.csv` | v6日期／市場別tick ladder下，兩 route 皆達 80% core 的68檔研究池；非 production |
+| `complete.json` | 八個 publication artifacts 的 hash／bytes與source lineage |

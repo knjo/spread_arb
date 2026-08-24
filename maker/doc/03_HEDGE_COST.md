@@ -1,5 +1,9 @@
 # Work Package 03：固定 50 ms Hedge 與成本
 
+Entry 兩條 route 的八日 raw pilot 見
+[quote_fill/PILOT_RESULTS.md](quote_fill/PILOT_RESULTS.md)。目前只完成 entry
+fill 後的 hedge；exit maker／hedge 與 pathwise EV 尚未完成。
+
 ## 時間定義
 
 ```text
@@ -31,10 +35,34 @@ latency_plus_depth
 
 賣出 taker 的符號反向，使正值統一代表成本。
 
+## Spot maker partial：先量化，再選補量政策
+
+Spot Bid／Ask maker 可能先只成交一個現貨 board lot，尚不足標準股期 `contract_size=2,000` 股。第一階段不先假設一定要立即 over-hedge，而是對每個 incremental spot fill 保存：
+
+```text
+initial_maker_fill_qty
+time_to_cumulative_hedge_unit
+P(cumulative maker qty >= contract_size by 50/100/250/500ms/1/2/5s)
+residual_qty_at_each_horizon
+```
+
+先按商品、時段、spread ticks、queue／流動性 feature 檢查「只成交一個 board lot」是否常見，以及幾秒內補到另一個 lot 的機率。若問題集中在特定低流動性 state，讓 admission／EV 表學習該狀態，不以全商品同一假設處理。
+
+若到候選等待期限仍不足一個股期 hedge unit，增加 `spot_taker_topup` branch：以當時 spot L1–L5 買／賣缺少的現貨數量，再建立整數股期 hedge。此 branch 會把部分成本從 future slippage 轉成 spot top-up spread／depth；「future 不會滑」只當待驗證假說，仍保存同期 future executable markout。
+
+比較的政策至少為：
+
+1. 等待 maker 累積到一個 hedge unit；
+2. 等待 `T` 後 taker spot 補足 residual，再 hedge future；
+3. 不補足，將 residual inventory 與後續 emergency cost保留給 WP04。
+
+`T` 由樣本的 completion probability、兩市場成本與未避險風險共同選擇，不事前固定成單一秒數。
+
 ## 輸出
 
 - Mean、p50、p90、p99 滑價。
 - Hedge complete、掃過檔數、stale book、IOC partial、retry 與 emergency outcome。
+- Spot initial／cumulative fill quantity、達到一個 contract-equivalent 的時間，以及 taker top-up qty／VWAP。
 - 10 ms、100 ms、1 s、5 s markout。
 - 30／100 ms 僅作 sensitivity；正式基準固定 50 ms。
 
