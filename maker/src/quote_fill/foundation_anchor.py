@@ -259,7 +259,7 @@ def _prepare_current_day(day: pl.DataFrame) -> pl.DataFrame:
             .n_unique()
             .alias("expiry_values")
         )
-        .filter(pl.col("expiry_values") != 1)
+        .filter(pl.col("expiry_values") > 1)
     )
     if inconsistent_expiry.height:
         raise ValueError("anchor day has inconsistent end_date within a contract")
@@ -574,7 +574,9 @@ def _tod_bucket() -> pl.Expr:
 def _dte_bucket() -> pl.Expr:
     dte = pl.col("calendar_dte")
     return (
-        pl.when(dte == 0)
+        pl.when(dte.is_null())
+        .then(pl.lit("unknown"))
+        .when(dte == 0)
         .then(pl.lit("00"))
         .when(dte <= 2)
         .then(pl.lit("01-02"))

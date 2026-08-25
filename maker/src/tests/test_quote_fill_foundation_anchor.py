@@ -49,6 +49,19 @@ def _day_frame(
 
 
 class FoundationAnchorTest(unittest.TestCase):
+    def test_missing_expiry_is_retained_as_explicit_unknown_dte(self) -> None:
+        seconds = list(range(601))
+        day = _day_frame(seconds, [float(value) for value in seconds]).with_columns(
+            pl.lit(None, dtype=pl.Date).alias("end_date")
+        )
+        result = evaluate_anchor_day(day, priors=None, stage="pseudo_holdout")
+        dte_rows = result.anchor_daily.filter(
+            pl.col("stratum_family") == "dte"
+        )
+        self.assertGreater(dte_rows.height, 0)
+        self.assertEqual(dte_rows["stratum_value"].unique().to_list(), ["unknown"])
+        self.assertTrue(dte_rows["calendar_dte"].is_null().all())
+
     def test_future_center_recomputes_the_entire_window_for_each_gate(self) -> None:
         seconds = list(range(601))
         basis = [float(value) for value in seconds]
