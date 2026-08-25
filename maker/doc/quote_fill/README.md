@@ -12,7 +12,7 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [REPLAY_SAMPLING.md](REPLAY_SAMPLING.md) | SpreadPair epoch、多層存續掛單、同價去重與撤單口徑 | 契約，已凍結 |
 | [PILOT_RESULTS.md](PILOT_RESULTS.md) | 八日／四商品 raw fill、partial、50 ms hedge 與 latent exit；含舊 60-session checkpoint 段落 | 八日 pilot 有效；60-session 段落資料已刪 |
 | [LIQUIDITY_SCREEN.md](LIQUIDITY_SCREEN.md) | 131 日 route liquidity、D-safe daily facts | 基礎事實，被 selector 讀 |
-| [MONTHLY_PRODUCT_SELECTOR_20260822.md](MONTHLY_PRODUCT_SELECTOR_20260822.md) | M-1 → M 因果商品池、proxy 排序力、3,886 product-day manifest | **現行 universe** |
+| [MONTHLY_PRODUCT_SELECTOR_20260822.md](MONTHLY_PRODUCT_SELECTOR_20260822.md) | M-1 → M q95／Spot-Bid proxy 商品池 | 舊 conditional bridge；canonical S0.5 overlap 3,846，不再作七組唯一母體 |
 | [ORDER_MESSAGE_LOAD_CAUSAL_1HZ_20260822.md](ORDER_MESSAGE_LOAD_CAUSAL_1HZ_20260822.md) | 1 Hz 掛撤量、現貨 100/s 與期貨 5/s 上限、13:00 drain | 現行 |
 | [ORDER_MESSAGE_LOAD_LEGACY_DIAGNOSTIC_20260822.md](ORDER_MESSAGE_LOAD_LEGACY_DIAGNOSTIC_20260822.md) | legacy hedge／makerFill 欄位可用性證據 | 現行 |
 | [ONE_SECOND_MAKERFILL_CAUSAL_V2_20260822.md](ONE_SECOND_MAKERFILL_CAUSAL_V2_20260822.md) | q95 AB1/2 approximate fill／cancel screening，7,730 fills | 現行；mixed-clock approximate |
@@ -21,7 +21,8 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md](MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md) | 五日 BID1–2 vs BID3–5 exact fill 與 hedge slip | 「只掛 A/B1–2」決策證據 |
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
 | [AUGUST_ATTRIBUTION_20260824.md](AUGUST_ATTRIBUTION_20260824.md) | S0 q95 raw-excursion touch vs post-touch queue 歸因、30-session sensitivity | **完成；兩者並列** |
-| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0 完成；S1 下一步** |
+| [FOUNDATION_REVALIDATION_S05_20260825.md](FOUNDATION_REVALIDATION_S05_20260825.md) | S0.5 anchor、q calibration／rank、q-independent broad cohort、七組成本幾何 | **完成；非execution／EV** |
+| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0／S0.5 完成；selected-anchor handoff待確認** |
 
 ## Archive（固定 45 檔、有 universe leakage）
 
@@ -33,5 +34,6 @@ prequential challenger、cost/cap sweep、aggressive 13:00、compact evaluator�
 
 `maker/data/walkforward/` 的現行層包含基礎事實（`daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、
 `exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1`）、因果 manifest、8/22 六個 causal 輸出、
-兩個 L1–L5 診斷 bundle，以及 S0 canonical／30-session sensitivity bundle。S0 舊 v1 有 explicit L1 clear
+兩個 L1–L5 診斷 bundle、S0 canonical／30-session sensitivity bundle，以及 S0.5
+`foundation_revalidation_s05_20260825_v1`。S0 舊 v1 有 explicit L1 clear
 forward-fill 錯誤，僅 v2 可引用；詳細 hash 與重跑方式見上述 S0 文件。

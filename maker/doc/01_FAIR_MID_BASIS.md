@@ -1,5 +1,7 @@
 # Work Package 01：穩定中價 Basis
 
+> 2026-08-25 canonical update：S0.5 已在 71 個 full-60 sessions 重驗。EWMA30 的 future-center MAE 8.877 bp，優於 EWMA120 的 9.750 bp，建議 EWMA30 作 development primary、EWMA120 作 incumbent control；使用 EWMA30 前必須重建 residual rolling boundaries。下列八日 pilot 與預先判定規則保留為歷史設計，正式結果與無 pass/fail 的現行研究定位以 [FOUNDATION_REVALIDATION_S05_20260825.md](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md) 及 [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) 為準。
+
 ## 研究問題
 
 能否在時間 `t` 只用當時已知資訊，產生一個既接近未來可交易中心、又不會造成 maker 掛價頻繁跳動的 `M_t`？

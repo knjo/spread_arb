@@ -4,7 +4,7 @@
 
 決策基線：nested repo commit `0c3e5ad`
 
-狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0 已完成，下一步為 S1**。完成一項就在本文件打勾並填結果與 bundle 連結。
+狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0、S0.5 已完成。S1 暫不開跑，先確認 S0.5 handoff 並重建 selected-anchor lookup**。完成一項就在本文件打勾並填結果與 bundle 連結。
 
 ## 研究定位（使用者定義）
 
@@ -26,7 +26,7 @@
 | B5 成交標籤 | S0–S4 的 Spot Bid **entry** A/B1–2 大範圍 screening 使用 legacy `makerFill` fast adapter；明標 approximate，S5 才對凍結組合做一次同樣本 exact entry 校準。Future maker 與 pooled FIFO exit 不適用 makerFill，分別照 S2／S3 使用 indexed replay |
 | B6 hedge 資料定價 | 先獨立判斷 `maker implied fill + 50 ms` 的 decision book；當下不可執行才往後最多 5 秒找第一個合法且足量 book。只有實際延後者標 delayed；不得把現有 213 筆預先全標 delayed |
 | C7 exit maker | 先做「現貨 Ask maker → 買期貨 taker」；工程跑通再加「期貨 Bid maker → 賣現貨 taker」 |
-| C8 13:00 後 | (a) 允許 carry、expiry 前強制平 與 (b) 13:00 起積極平倉、13:20 hard flatten 都跑，比較「犧牲平倉收益換隔日容量」是否划算 |
+| C8 13:00 後 | (a) 允許 carry，真正留到 expiry 的少量 paired residual 以 basis=0 accounting mark 結清；(b) 13:00 起積極平倉、13:20 hard flatten。比較「犧牲平倉收益換隔日容量」是否划算 |
 | C9 部位 | `hard_intraday_cap_twd = TWD 20,000,000`（20M／2,000 萬），單檔 50%，即 TWD 10,000,000；其他 cap 之後再做 |
 | D10 驗收 | 無 pass/fail 門檻；固定報 20M 日均 net 與同日完成率 |
 
@@ -40,12 +40,13 @@
 - Spot Bid entry 以 maker limit price × contract size保留；Future Ask entry 以 D 日 frozen causal `1.08 × opening_ref_price × contract_size` 作保守上界，spot hedge完成後用實際 spot notional reconcile並釋放差額。合法 depth 價格嚴格低於同一 frozen bound，因此實際值不得突破 reservation。
 - Working reservation 在 maker fill 時轉入 `hedge_pending／paired_open`，不重複計額；未成交 leaves 只在 actual cancel send cursor（V0）或可驗證的 day-order session-expiry event 後釋放。Partial fill 同時保留 filled exposure與剩餘 leaves reservation。
 - Entry hedge pending／delayed 期間仍占額；完整 exit hedge 執行後才釋放 position capacity。Entry emergency rollback 完成則釋放該 reservation；exit emergency rollback 只恢復原 paired position，不釋放原 capacity。任何 rollback failure 持續占 committed capacity 到真正 resolution 或 reporting horizon。
+- 白話說法：entry maker 成交只把掛單 reservation 轉成 exposure，反腿 taker 完成後成為 paired position，容量仍被部位占用；正常 exit maker 成交後，還要等反腿 taker 真正完成才 flat 並釋放容量。不能在 maker fill 時先假設 50 ms 後一定成交而提早釋放。
 - 「hard cap」只指本文件 V0 replay（cancel send 後立即生效）與該 stage可觀測 fill universe內的 hard invariant；因 S0–S4 Spot Bid看不到 partial、也沒有 exchange ACK／cancel-race truth，不宣稱已證明 production exchange-level hard cap。
 
 ### B5：接受 entry fast screen，但不把 makerFill 說成 exact
 
 - Actual-new send 在共同 chronological event loop 內成立時，才依該 cursor snapshot 的 `(ValueCode, ChannelSeq)` 取得 A/B1–2 `Float32 FillSeconds`，以 `snapshot RecvTime + FillSeconds` 建立 mixed-clock **potential** fill event。
-- Potential fill、cancel intent、token cursor、hedge／rollback 都在同一 event loop 競爭；`actual_cancel_send_time`／session expiry 是回放輸出，不可先拿來建 label。最終只接受位於 `(actual_new_send_time, effective_cancel_or_expiry]` 且先於其他 terminal 的 potential fill，再回填 active interval。Nominal submit／stop只留 audit；cancel 是 controller **request**，不是 makerFill 自帶撤單，也不是 exchange cancel ACK。
+- Potential fill、cancel intent、現貨／期貨各自的送單額度、hedge／rollback 都在同一 event loop 競爭；`actual_cancel_send_time`／session expiry 是回放輸出，不可先拿來建 label。最終只接受位於 `(actual_new_send_time, effective_cancel_or_expiry]` 且先於其他 terminal 的 potential fill，再回填 active interval。Nominal submit／stop只留 audit；cancel 是 controller **request**，不是 makerFill 自帶撤單，也不是 exchange cancel ACK。
 - 所有輸出保留 `fill_cursor_exact=false`、`own_quantity_included=false`、`partial_fill_included=false`、`cancel_ack_observed=false`、`joint_volume_allocated=false`。不得把 approximate full fill 改名成實盤成交。
 - 本決策只涵蓋 Spot Bid entry 的大範圍 sweep。Future maker 沒有 legacy 欄位；pooled FIFO exit 需要 own quantity／partial／共同 printed volume，兩者使用 indexed replay，不把它們稱為 B5 的 exact calibration。
 - S5 的 entry 係數定義為同一批 `raw_order_fact_id` 分母上的 `exact full-fill rate / approximate fill rate`；同報 confusion matrix。係數只作 aggregate sensitivity，不逐筆線性縮放非線性的 PnL、FIFO 或 cap admission。
@@ -55,16 +56,16 @@
 本規則適用所有 entry／exit taker hedge。先定義 route-neutral `hedge_trigger_cursor`：S1 Spot Bid entry 用 legacy implied fill cursor；S2 Future Ask entry 用 indexed exact full-fill cursor；S3 pooled exit 用累積到一個 futures-equivalent hedge unit 的完成 cursor，而不是第一筆 partial；S4 forced flatten 用 initiating first-leg executable fill cursor。令 `t0 = hedge_trigger_cursor + 50 ms`：
 
 1. Arrival book 只供 hedge trigger 當下的 slippage reference；arrival 無效不得讓程式跳過 `t0` execution-book 判定。舊結果中的 196 筆 `arrival_gate_closed` 因此不能先假設為 delayed。
-2. 先用 causal as-of raw state **獨立**保存 `t0` book status，不再受 arrival status短路。若 `t0` book合法、L1–L5 足量且 venue limiter可立即送出，就在同一 scheduler 實際送出並消耗一筆 request；V0 的 `execution_time = actual_request_send_time`，價格取 send cursor 的 causal as-of executable VWAP，`hedge_delayed=false`。
-3. 若 book或 token 任一條件在 `t0` 不成立，就沿完整 raw `RecvTime`／event cursor與 scheduler token時間，在 `(t0, min(t0+5s, session_end)]` 找第一個同時滿足「合法足量 book＋可送 request」的 cursor，以該時點 executable VWAP 定價。內部等待／檢查不消耗 venue request，只有實際 marketable hedge送出時消耗一筆。
-4. Hedge deadline cursor 先做 inclusive dispatch；仍未送出就把原 hedge intent 原子式標 `hedge_retry_timeout`、移出 queue，再 enqueue 主版 emergency rollback，不得日後又補送原 hedge。Rollback 用 route-neutral `initiating_first_leg_venue / initiating_execution_id`，以最高風險優先序在 `[timeout, min(timeout+5s, initiating venue session_end)]` 找第一個「opposite book 合法足量＋該 venue token 可送」cursor，經同一 scheduler消耗一筆 request，反向沖銷 initiating first-leg execution；V0 價格同樣取 actual send cursor 的 causal book。Entry rollback完成後回到 flat並釋放 reservation；exit／forced-flat rollback完成後恢復原 paired position、繼續占原 capacity。Rollback仍失敗者進 `entry_hedge_timeout_unresolved` 或 `exit_hedge_timeout_unresolved`，明列 `emergency_rollback_failed` 與裸露 notional，不得消失。
+2. 先用 causal as-of raw state **獨立**保存 `t0` book status，不再受 arrival status短路。若 `t0` book合法、L1–L5 足量且相應市場仍有送單額度，就在同一 scheduler 實際送出並消耗一筆 request；V0 的 `execution_time = actual_request_send_time`，價格取 send cursor 的 causal as-of executable VWAP，`hedge_delayed=false`。
+3. 若 book或相應市場送單額度任一條件在 `t0` 不成立，就沿完整 raw `RecvTime`／event cursor與 scheduler 額度時間，在 `(t0, min(t0+5s, session_end)]` 找第一個同時滿足「合法足量 book＋可送 request」的 cursor，以該時點 executable VWAP 定價。內部等待／檢查不消耗 request，只有實際 marketable hedge送出時消耗一筆。
+4. Hedge deadline cursor 先做 inclusive dispatch；仍未送出就把原 hedge intent 原子式標 `hedge_retry_timeout`、移出 queue，再 enqueue 主版 emergency rollback，不得日後又補送原 hedge。Rollback 用 route-neutral `initiating_first_leg_venue / initiating_execution_id`，以最高風險優先序在 `[timeout, min(timeout+5s, initiating venue session_end)]` 找第一個「opposite book 合法足量＋相應市場可送 request」cursor，經同一 scheduler消耗一筆 request，反向沖銷 initiating first-leg execution；V0 價格同樣取 actual send cursor 的 causal book。Entry rollback完成後回到 flat並釋放 reservation；exit／forced-flat rollback完成後恢復原 paired position、繼續占原 capacity。Rollback仍失敗者進 `entry_hedge_timeout_unresolved` 或 `exit_hedge_timeout_unresolved`，明列 `emergency_rollback_failed` 與裸露 notional，不得消失。
 
 合法 book 固定為：使用完整 normalized raw-state machine；非 TrialMatch，TrialMatch 後須等新的 formal book 才重開 gate；bid／ask 有正價格與正數量且 `bid <= ask`；reference price 為正，executable BBO 與實際掃到的 levels 均嚴格位於 `(0.91 × ref, 1.08 × ref)`；Best／L1 同價取最大量、不相加；L1–L5 足以完成 requested hedge quantity。Book age 記錄但不作主版 hard gate。
 
 每筆至少保存：
 
 - `hedge_trigger_time_ns`、`hedge_target_time_ns = t0`
-- `hedge_request_send_time_ns`（套 venue limiter 後）
+- `hedge_request_send_time_ns`（套相應市場送單額度後）
 - `hedge_execution_time_ns`、`hedge_book_recv_time_ns`
 - `hedge_retry_delay_ms = execution_time − t0`
 - `hedge_total_delay_ms = execution_time − hedge_trigger_time`
@@ -76,15 +77,15 @@
 
 正值一律代表不利。On-time 與 delayed 分列筆數、pricing coverage、slippage reference coverage、delay p50／p95／max、latency／depth／total slip；不得把 null slip 當 0。
 
-## 共同比較、選優與重現契約（S0 前凍結）
+## 共同比較、選優與重現契約（S0 原凍結；S0.5 修訂）
 
 ### Development 資料與因果邊界
 
-- S0–S4 固定使用 `maker/data/walkforward/monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`，SHA-256 `9f1bcddf17eff968ee51e0decdb04736a3747f0665886ce3e4fd26031cfb5891`。
-- Entry cohort 是 2026-05-04～2026-08-13 共 72 sessions；terminal／cashflow 追至 2026-08-21，共 78 reporting sessions。「August」固定指 2026-08-03～2026-08-13 共 9 個 entry sessions，不外推成完整月。
-- 這份共同 universe 是用 q95、spot-bid route proxy 選出的 matched universe。S1 不依 policy 重選、S2 不依 route 重選；因此所有結論都要寫成「conditional on common q95 spot-route-selected universe」。
-- Rolling boundary 固定 `lookback_sessions=60`、`min_history_sessions=40`、正負側分開、嚴格 `<D`；2026-05-04 尚非完整 60-session table，報表必列實際 history sessions，不得宣稱每列都滿 60。
-- S5 的 September 不重用這份 72 日 manifest；它用同一個凍結 selector config，以完整 2026-08 建 Aug→Sep membership，再逐日套 `<D` boundary／liquidity。
+- S0 歷史歸因固定使用 `monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`，SHA-256 `9f1bcddf17eff968ee51e0decdb04736a3747f0665886ce3e4fd26031cfb5891`；原 manifest 是 2026-05-04～2026-08-13 共 72 sessions、3,886 product-days，terminal／cashflow 追至 2026-08-21 共 78 reporting sessions。它是用 q95／Spot-Bid proxy 選出的 conditional matched sample，只保留成 bridge／sensitivity；其中落在 S0.5 的 71 個 full-60 sessions 且進入 broad cohort者是 3,846 product-days，兩個數字不可混用。
+- S0.5 incumbent primary 是 2026-05-05～2026-08-13 共 71 個 full-60 sessions。現有 EWMA120 q-independent Spot-Bid broad reference 為 15,935 product-days、244 商品；selected anchor 若改為 EWMA30，須重建 excursion、rolling boundary 與 q-independent cohort，重新發布精確筆數後才凍結 S1 universe。
+- S1／S2 不得依 policy／route outcome 各自重選。建議共同母體使用 selected-anchor 的 q-independent D-safe broad cohort；舊 q95 matched manifest 只列 sensitivity。此項等使用者確認 S0.5 handoff 後定案。
+- Rolling-60 baseline 固定 `lookback_sessions=60`、正負側分開、嚴格 `<D`。S0.5 證明排序力強但 5→8 月 absolute reach 漂移；若加 level recalibration／短窗 challenger，其公式與 history minima 必須在 S1 outcome 前另行凍結，不能事後 fine-tune。
+- S5 的 September 不重用舊 q95 manifest；它使用最終凍結的 selected-anchor、cohort／selector config，再逐日套 `<D` boundary／liquidity。
 
 ### 共用 order、position 與 accounting 狀態
 
@@ -92,14 +93,15 @@
 - Policy 不放進 raw order identity。相同 `Date / ValueCode / QuoteCode / route / stage / maker_side / absolute_price_tick / start_cursor / lifecycle` 共用 `raw_order_fact_id`；這就是唯一的 physical-order lifecycle ID，不另建語意重疊的 `physical_order_id`。另用 `candidate_intent_id` 銜接 scheduler 前的同一掛單意圖、`policy_alias_id` 表示反事實 policy。跨 policy 絕不相加。
 - Working-order 狀態至少為 `intent_pending → working_reserved → entry_maker_partial / filled / actual_cancelled / session_expired`；coalesced 或到 nominal stop仍未實際送出的 new不建立 `raw_order_fact_id`。Position狀態至少為 `maker_filled → hedge_pending → paired_open → exit_in_progress → flat`；另有 `entry_partial_rollback_pending / exit_partial_rollback_pending / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved` unpaired risk states，絕不餵給只接受 `paired_open` 的 S3 FIFO controller。
 - 任一 cursor 的 `total_committed_notional = working_unfilled_reservation + entry_partial_exposure_notional + hedge_pending_notional + paired_open_notional + exit_in_progress_committed_notional`，global 不得超過 20M、單商品不得超過 10M；狀態轉移不重複計額。Entry partial 的 filled exposure＋leaves reservation不得超過原 reservation；exit partial／hedge pending把整個 futures-equivalent unit 從 `paired_open` 移到 `exit_in_progress`，仍按原 position notional計額。每個 reservation／transfer／reconcile／release timestamp 必須可由逐列 ledger 重算。
-- `partial_rollback_trigger_cursor = effective_cancel_or_session_expiry`。Entry／exit sub-unit partial從 trigger起進相應 rollback-pending state，在 `[trigger, min(trigger+5s, initiating venue session_end)]` 依共同合法足量book＋token、同cursor phase與actual-send定價規則反向沖銷已成交 quantity；deadline inclusive dispatch後仍未送出就原子式 expire，轉 partial-unresolved，舊intent不得日後補送。
+- `partial_rollback_trigger_cursor = effective_cancel_or_session_expiry`。Entry／exit sub-unit partial從 trigger起進相應 rollback-pending state，在 `[trigger, min(trigger+5s, initiating venue session_end)]` 依共同合法足量book＋相應市場送單額度、同cursor phase與actual-send定價規則反向沖銷已成交 quantity；deadline inclusive dispatch後仍未送出就原子式 expire，轉 partial-unresolved，舊intent不得日後補送。
 - Spot Bid exact entry若只 partial fill：working期間照上述 split占額；trigger後賣回已成交 spot quantity，成功才釋放，失敗進 `entry_partial_unresolved`。每個有正 exact entry fill的 order都留在 exact同日率分母；partial rollback不算 intended-cycle completion。S0–S4 legacy adapter仍須明標它看不到此狀態。
 - 同 timestamp 的 cap replay 採保守順序：entry reservation 先於 exit release。Opening carry 商品主版維持該交易日 exit-only，不因盤中釋放後重新開倉。
 - 成本固定為：現貨手續費**每邊** 1.71 bp；現貨賣出稅當沖 15 bp、非當沖 30 bp；期貨稅**每邊** 0.2 bp、期貨手續費**每邊** TWD 20（`quote_fill/transaction_costs.py`）。主版尚未計 overnight financing、borrow 或 margin opportunity cost，因此另報 overnight notional-days，不把未建模成本說成 0。
 - `transaction_costs.py` 要拆出 per-executed-leg primitives；每次 fill／hedge／rollback／forced leg 都寫 append-only ledger：`market / side / qty / price / signed_cashflow / commission / tax / execution_date / inventory_lot_id / acquisition_date`。Spot sell tax 依被解除 lot 的 acquisition date 判 15／30 bp；exit rollback 買回的 spot 是新 lot、以 rollback date 作 acquisition date。Terminal realized net 由逐腿 ledger 重建並歸 terminal Date；未解除的單腿只報 executed cashflow、inventory 與 mark／risk，不混入 realized net。
+- 依使用者指定，真正留到 stock-futures expiry 的少量 **paired** residual 採 `expiry_basis_zero_accounting`：用 expiry 日現貨收盤價同時標現貨與期貨，令 terminal basis=0。它是 accounting convention，不生成交易 request／fill／slippage、不算 executable same-day completion；另報 position count、notional 與使用此 convention 的 PnL。Naked／unresolved 單腿不得用此規則洗成 paired flat。
 - 13:00 停新倉；spot entry working orders 約 12:59:58 起停止 new 並分散 drain，不能假設 13:00 同秒無限量撤單。
 
-Venue scheduler 以**實際送出 timestamp**驗證任意 rolling interval `(t−1s, t]`：spot 最多 100 requests、future 最多 5 requests。優先序固定為 exposed-risk request（emergency rollback → entry／exit hedge → aggressive first leg）→ cancel → new；同級依原始 request cursor、再依穩定 ID FIFO，cutoff drain 的 cancel 再依最積極價格優先。Book／depth 尚不合法的 hedge不進 send-eligible queue，也不 head-of-line block其他已合法 hedge；一旦合法仍須在 dispatch cursor重驗 book，合法者才按上述 FIFO 競爭 token。Hedge 在 deadline 前不因暫時無 token而 drop；deadline inclusive dispatch後依 B6原子式 expire／rollback。Cancel intent保留到實際送出或 order terminal，若 terminal使其失效須記 `cancel_not_needed`；已指派 actual send cursor者仍計 request。尚未送出的同 order new intent只保留最新 desired state，已過 nominal stop就不再補送。容量不足的 new可留在 intent queue到 nominal stop，實際送出前才做 C9 reservation；始終未送者標 `cap_blocked`而非 fill rejection。Forced flatten另有 per-position cancel barrier：相關 passive leaves尚未 `actual_cancelled / session_expired`前，其 dependent first leg不是 send-eligible；risk-transition cancel必須先送，期間發生的 maker fills先重算 residual。若 limiter讓 hedge晚於 `t0`，延遲納入 B6的5秒總窗與 `hedge_retry_delay_ms`，不得另開一個不計價的時鐘。
+本文的 venue token 只表示「該市場在該時點剩餘的一個送單 request 額度」，不是商品 token、部位或資金。實作與報表改稱**現貨送單額度**／**期貨送單額度**：以實際送出 timestamp 驗證任意 rolling interval `(t−1s, t]`，spot 最多 100 requests、future 最多 5 requests。優先序固定為 exposed-risk request（emergency rollback → entry／exit hedge → aggressive first leg）→ cancel → new；同級依原始 request cursor、再依穩定 ID FIFO，cutoff drain 的 cancel 再依最積極價格優先。Book／depth 尚不合法的 hedge不進 send-eligible queue，也不 head-of-line block其他已合法 hedge；一旦合法仍須在 dispatch cursor重驗 book，合法者才按上述 FIFO 競爭該市場送單額度。Hedge 在 deadline 前不因暫時沒有額度而 drop；deadline inclusive dispatch後依 B6 原子式 expire／rollback。Cancel intent保留到實際送出或 order terminal，若 terminal使其失效須記 `cancel_not_needed`；已指派 actual send cursor者仍計 request。尚未送出的同 order new intent只保留最新 desired state，已過 nominal stop就不再補送。容量不足的 new可留在 intent queue到 nominal stop，實際送出前才做 C9 reservation；始終未送者標 `cap_blocked`而非 fill rejection。Forced flatten另有 per-position cancel barrier：相關 passive leaves尚未 `actual_cancelled / session_expired`前，其 dependent first leg不是 send-eligible；risk-transition cancel必須先送，期間發生的 maker fills先重算 residual。若送單額度讓 hedge 晚於 `t0`，延遲納入 B6 的 5 秒總窗與 `hedge_retry_delay_ms`，不得另開一個不計價的時鐘。
 
 同 cursor phase 固定為：先 ingest causal raw state並凍結本 cursor 的 send assignment；再讓 cursor前已 working的 order分配 printed volume／potential fill；接著執行已指派的 marketable requests，然後讓 cancel只作用於剩餘 leaves，最後才讓 new成為 working。故既有 order的同-cursor fill先於 cancel成立，已指派 cancel仍耗一筆 request；new不能吃同-cursor fill。C9 new admission以 cursor前 committed balance判斷，不得使用同-cursor exit／cancel release；V0 cancel只在上述 phase後立即生效。`actual_cancel_send_time`與active interval都是此 event loop的輸出。
 
@@ -136,16 +138,19 @@ Venue scheduler 以**實際送出 timestamp**驗證任意 rolling interval `(t�
 ## 工作順序與固定 handoff
 
 ```text
-S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
-                                           ↓
-                   S5 spec／exact／Sep ← S4 close policy ← S3 exit maker
+S0 8 月歸因 → S0.5 查表基礎重驗 → selected-anchor lookup 重建／凍結
+                                      ↓
+              S1 七組 Spot Bid → S2 Future Ask → S3 exit maker
+                                                     ↓
+                         S5 spec／exact／Sep ← S4 close policy
 ```
 
 1. S0 只診斷，不看結果改七組 primary grid；30-session 只能另列 sensitivity。
-2. S1 跑 7 組，依共同規則留最多 2 組 finalist。
-3. S2 只跑這 2 組；兩 route backend／sampling 不 pooling，完成後重選最多 2 個 entry finalist。
-4. S3 對 entry finalists 先跑第一條 exit route。「跑通」只指 partitions、schema、ledger invariants、verifier 與 tests 通過，與 PnL 無關；工程完成即加第二條 route，再留最多 2 個 entry×exit finalist。
-5. S4 對同一 finalist stream 各自跑 carry 與 aggressive；完成後對全部 resulting combinations重新套共同 shortlist，把 primary completion champion與secondary net champion交給 S5。S5 不再搜尋新參數。
+2. S0.5 先驗 anchor、boundary 校準／排序、q-independent cohort 與已知成本幾何。它不選 execution champion；selected anchor／level challenger／cohort 先凍結並重建 lookup，才進 S1。
+3. S1 跑 7 組，依共同規則留最多 2 組 finalist。
+4. S2 只跑這 2 組；兩 route backend／sampling 不 pooling，完成後重選最多 2 個 entry finalist。
+5. S3 對 entry finalists 先跑第一條 exit route。「跑通」只指 partitions、schema、ledger invariants、verifier 與 tests 通過，與 PnL 無關；工程完成即加第二條 route，再留最多 2 個 entry×exit finalist。
+6. S4 對同一 finalist stream 各自跑 carry 與 aggressive；完成後對全部 resulting combinations重新套共同 shortlist，把 primary completion champion與secondary net champion交給 S5。S5 不再搜尋新參數。
 
 ### S0　8 月惡化歸因（先做，預估一天）
 
@@ -162,14 +167,33 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 
 完成結果（2026-08-24）：[`AUGUST_ATTRIBUTION_20260824.md`](quote_fill/AUGUST_ATTRIBUTION_20260824.md)。May～Jul pooled → August 的 excursion touch rate為 7.1497% → 4.2923%，post-touch approximate fill為1.8796% → 1.2183%，故分類為兩者並列；30-session market-only sensitivity將August hypothetical touch提高至4.5043%，仍未消除落差，不進S1 shortlist。Canonical bundle為`maker/data/walkforward/august_attribution_s0_20260824_v2`，`complete.json` SHA-256 `5bb3addbd674fc85162630a9f2a7033b1d52bec253dfbb698deabb19cdb3f28b`；30-session bundle為`august_attribution_s0_30_session_challenger_20260824_v1`，marker SHA-256 `680d68bf6cccb9f459b19ed199e82bb7b5c6f0a7bbffb3c468e42ad30e2b15ed`。舊`august_attribution_s0_20260824_v1`有explicit L1 clear forward-fill錯誤，已由v2取代且不得引用。
 
+### S0.5　查表基礎重驗
+
+- [x] 用 2026-05-05～2026-08-13 共 71 個 full-60 sessions 比較 causal anchor；future center 逐 freshness gate 重算，whole-Date bootstrap，不把秒級資料當 iid。
+- [x] 新增 left／right censor-aware excursion overlay，保留 hit、known miss、unknown 與 no-observable product-day；驗證新 overlay 的非 left-censored部分與既有 daily facts 完全等價。
+- [x] 以 product-day equal 為 primary，重驗 q50／q80／q95 絕對 reach、月度 drift 與逐日商品間 Spearman；event-pooled 只作 audit。
+- [x] 建立未使用 target outcome 的 q-independent cohort funnel；舊 q95 monthly selector只作 bridge。
+- [x] 對七組 policy 共用同一 Spot-Bid broad cohort，計完整 `upper+lower`、合法 tick、逐腿同日／隔日費稅與 10／20／30 bp adverse sensitivity；固定 `actionable_execution=false`、`ev_ready=false`。
+- [x] 發布 clean-commit、full-input-hash、marker-last canonical bundle，排除 2026-08-14 起 locked forward；282 tests／48 subtests、Ruff、`py_compile`、`--verify-inputs` 通過。
+
+完成結果（2026-08-25）：[`FOUNDATION_REVALIDATION_S05_20260825.md`](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md)。EWMA30 的 future-center MAE 8.877 bp，優於 EWMA120 的 9.750 bp，建議升為 development primary，但須先用其 residual 重建 q table。Rolling-60 lookup 在六個 q×side 的逐日 Spearman 全為正、平均 0.615～0.673，證明有排序力；q95 LB 卻由 5 月約 8.4% 降至 8 月約 4.0%，證明 absolute level 有 regime lag。EWMA120 incumbent broad reference 為 15,935 product-days；舊 selector只重疊 3,846。Nominal q80／q95 同日已知成本後 margin 中位數為 11.632／38.102 bp，但沒有 execution／EV。Canonical bundle 為`maker/data/walkforward/foundation_revalidation_s05_20260825_v1`，`complete.json` SHA-256 `dd89f42c4c10ef38d4b32fce492749c3646416121e5f64286034ba22b73b149b`。
+
+S1 前 handoff：
+
+- [ ] 確認 anchor 正式目標；建議 EWMA30 development primary、EWMA120 incumbent control、prior-seeded不升格。
+- [ ] 凍結 rolling-60 baseline 以外唯一一個完全 `<D` 的 level recalibration／短窗 challenger。
+- [ ] 確認 S1 primary 使用 selected-anchor 重建後的 q-independent broad cohort；舊 q95 matched sample只作 sensitivity。
+- [x] Expiry paired residual 採使用者指定的 spot-close／spot-close、basis=0 accounting convention；非 executable、非 same-day completion。
+
 ### S1　七組 policy × Spot Bid maker route
 
+- [ ] 先完成上述 S0.5 handoff 與 selected-anchor excursion／rolling-boundary／broad-cohort canonical rebuild；不得把 EWMA120 distance 直接套到 EWMA30。
 - [ ] 先建立共用 `PolicySpec`，把 `one_second_message_load_runner` 的 q95 常數／target／admission 泛化；不能只改下游 `attach_q95_boundaries`。
 - [ ] `one_second_makerfill_runner.attach_q95_boundaries` 改為 `attach_boundaries(policy_spec)`；q 組讀 D-1 distance，fixed 組為 `upper=lower=W` 並保存 constant-policy provenance。
 - [ ] `dynamic_estimated_path_portfolio.py` 移除 `frozen to q95`；每筆 position 保存 submit 當下 frozen lower。Delayed hedge 的 path 從**實際 hedge execution**後下一完整秒開始，不再硬要求恰為 fill+50 ms。
 - [ ] 依 B6 改成完整 raw-state retry；現有 sparse loader 忽略 non-book TrialMatch state，不能只把 as-of query 延長 5 秒。
 - [ ] Cap config 只跑 `TWD 20,000,000`、`per_product_fraction=0.50`，並把 config／hash 寫入 bundle；不得沿用預設 10–50M／30%。Primary engine 在 entry new 實際送出前做 reservation，不能先收 fill 再用舊 chronological filter挑 admission。
-- [ ] 每個 policy 各自跑單一 chronological event loop：共同 ingest candidate intents、raw state、potential makerFill、reservation、兩 venue token、hedge／rollback與terminal事件。Actual new時才建立 potential fill；actual cancel／expiry由 loop產生並回填 active interval，不能先預算 cancel再跑 fill。輸出根目錄含 `<policy_id>_<run_id>`。
+- [ ] 每個 policy 各自跑單一 chronological event loop：共同 ingest candidate intents、raw state、potential makerFill、reservation、現貨／期貨兩套送單額度、hedge／rollback與terminal事件。Actual new時才建立 potential fill；actual cancel／expiry由 loop產生並回填 active interval，不能先預算 cancel再跑 fill。輸出根目錄含 `<policy_id>_<run_id>`。
 - [ ] 相同 raw order 共用 `raw_order_fact_id`，policy 用 alias；七組只作 alternative scenario，跨 policy 不相加。
 - [ ] Verifier逐 cursor檢查共同 `total_committed_notional <= 20M`、每商品 `<=10M`、fill只來自已保留容量的實際 working order、partial split與state transfer不重複計額、cancel／expiry才釋放 leaves；報表另列各 committed bucket與 total peak。
 - [ ] 比較表至少含：candidates、supported denominator、`entry_fill_truth`、target 位於 inside-spread／not-passive、B1、B2、B3–5、deeper／invalid 的 product-seconds、fill／actual-cancel／session-expiry／unknown、submit-to-fill p50/p95、venue request peak、hedge pricing/reference coverage、on-time／delayed／timeout／rollback outcome、delay與 slip p50/p95、同日／跨日／expiry／unresolved、20M-admitted priced net bp與coverage、reservation attempts／cap-blocked／sent／unfilled-cancelled／maker-filled、日均新 spot、各 committed peak、未平與 naked notional、**20M screen日均 net、`approx_screen_completion_rate_20m`**。
@@ -182,11 +206,11 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 
 - [ ] Future maker 沒有 legacy makerFill，用 `execution_runner` + `indexed_replay`。新增直接讀 manifest `(Date, ValueCode)` 的 CLI／adapter；現有 day-batched engine 可沿用，不重寫核心，只停用舊 `sessions × symbols` wrapper。Target builder 必須讀共同 `PolicySpec`：q 組使用 D-1 upper／lower，fixed 組直接使用常數 bp，不能把 fixed finalist 塞進現有 quantile-only config。
 - [ ] Hedge 方向反過來：future maker 一口完整成交後 +50 ms 買 spot；requested shares 必須等於當日 `contract_size`（目前一般為兩個 board lots），以 spot L1–L5 VWAP 定價。Future maker 一口沒有 partial，小於一口不建立 position。
-- [ ] Venue limiter 依市場分開：future maker new／cancel 用 futures rolling 5 requests/s；spot taker hedge 用 spot 100 requests/s 並在 spot venue 優先。B4 已決定不雙 entry route 同掛，所以兩者**不共享 futures limiter**。
+- [ ] 送單額度依市場分開：future maker new／cancel 用 futures rolling 5 requests/s；spot taker hedge 用 spot 100 requests/s 並在現貨額度內優先。B4 已決定不雙 entry route 同掛，所以 alternative routes 不在同一次 replay 共用 futures 額度。
 - [ ] 沿用共同的事件式 rolling scheduler／priority／coalesce 契約；actual send cursor 必須回寫 order lifecycle與 fill replay，不能只在結果後按 fixed second 重算。Spot taker hedge完整套 B6 retry／timeout／Future-maker rollback。
 - [ ] Future Ask new 在**實際送出前**以 D 日 frozen causal `1.08 × opening_ref_price × contract_size` 做 C9 reservation；future fill只把 working reservation轉入 hedge pending，spot hedge後才用實際 spot VWAP reconcile差額。Timeout／rollback期間照共同 ledger占額，任何 actual spot notional 超過 reservation即 verifier failure。
 - [ ] 只跑 S1 的兩個 policy finalists。和 S1 相同欄位，加 route／backend／sampling contract；兩 route 只並列、不 pooling。
-- [ ] 報告標題與結論明寫：這是 common q95 spot-route-selected universe 上的 conditional future-route comparison，不是 future route 自己重選的商品池。
+- [ ] 報告標題與結論明寫：這是 S1 凍結的 selected-anchor q-independent common cohort 上的 conditional future-route comparison，不是 future route 自己重選的商品池；舊 q95 matched sample另列 sensitivity。
 
 輸出：`doc/quote_fill/POLICY_COMPARISON_FUTURE_ASK_<YYYYMMDD>.md` 與 S2 bundle。
 
@@ -199,9 +223,9 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 - [ ] 同一 inventory 不得被多價位重複 reservation；每個 position的 quantity只能分配給一個 active working order。同-cursor fill／cancel完全沿用共同 phase。Spot只成交一 lot時把整個 unit移入 `exit_in_progress`，累積到 futures-equivalent quantity才送 futures hedge。
 - [ ] Day-order actual cancel／session expiry時，若 cumulative exit fill仍不足一個 hedge unit，對已成交 quantity立即走共同 rollback scheduler，在 initiating venue反向買／賣回並計逐腿成本；成功恢復 paired inventory但新買回spot lot重設 acquisition date，失敗進 `exit_partial_unresolved`且不釋放容量，不得把單腿 partial裸露帶過夜卻仍標 carry。
 - [ ] Exit maker fill 後到 hedge 完成前仍占原 cap；future exit hedge 也套 B6 retry。`cap_release_time_ns = exit_hedge_execution_time_ns`。
-- [ ] S3 shortlist 前先落地共用 executable forced-flatten primitive，供 carry 路徑的 expiry 前強制平：逐 futures-equivalent unit、相關 passive-order cancel barrier、first leg 完整足量、第二腿 B6／rollback、兩腿完整才 release。S4 只在此 primitive 上增加 13:00 peg 與 13:20 trigger，不另寫一套 expiry producer。
-- [ ] Frozen-lower taker/taker 固定為**獨立 counterfactual control**，不與 exit maker 主路徑 OCO、也不作主 ledger 的 cap terminal。主版 exit maker 若當日未成交就進 carry；兩套結果以同一 entry cohort 並列。
-- [ ] `carried_eod` 是每日狀態，不是 terminal outcome。Exit-maker 主版互斥 terminal至少含 `exit_maker_flat / expiry_forced_flat / entry_emergency_rollback_flat / entry_partial_rollback_flat / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved / unresolved`，另存 `control_taker_taker_terminal`，不得混成一欄；rollback成功後繼續 carry者直到真正 terminal前仍只是 daily state。
+- [ ] S3 shortlist 前先落地共用 executable **13:20 risk hard-flatten** primitive，供 S4 aggressive 分支重用：逐 futures-equivalent unit、相關 passive-order cancel barrier、first leg 完整足量、第二腿 B6／rollback、兩腿完整才 release。Expiry 不走此 execution producer，另按已定案的 basis=0 accounting convention。
+- [ ] 正常 frozen lower 只使用 `Spot Ask maker → Buy Future taker`（第二 route則 `Future Bid maker → Sell Spot taker`），保持 maker＋taker。Taker＋taker 只可作獨立風險 control／S4 13:20 hard flatten，不與 lower 主路徑 OCO，也不拿多輸的 tick 冒充 lower 收益。
+- [ ] `carried_eod` 是每日狀態，不是 terminal outcome。Exit-maker 主版互斥 terminal至少含 `exit_maker_flat / expiry_basis_zero_accounting / aggressive_hard_flat / entry_emergency_rollback_flat / entry_partial_rollback_flat / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved / unresolved`，另存 `control_taker_taker_terminal`，不得混成一欄；rollback成功後繼續 carry者直到真正 terminal前仍只是 daily state。
 - [ ] 跨日 day order 收盤 cancel、隔日重新建單，queue age 不跨日延續；商品離開 entry universe 仍可 exit-only。
 - [ ] 先完成 Spot Ask route 的全部 invariant／verifier／tests，再加 `Future Bid maker → Sell Spot taker`。兩條 exit routes先作互斥 alternative scenarios，不雙掛；第二條 route 也用 indexed replay。每個 scenario 內，future maker quotes 與 future taker hedges在同一 5/s venue scheduler 中，hedge 優先。
 - [ ] 每個 exit route scenario 都從共同 `candidate_intent_id` stream 做一次完整 event-driven replay：entry／exit request 共用兩個 venue scheduler，scheduler輸出的 new／cancel／hedge cursor再回饋 maker label、B6、`position_established_ns`、FIFO、reservation與terminal ledger，直到 event queue結束。不得把 S1 position／execution cursor當不可變輸入，也不得只事後重算 message-load count；alternative routes仍不相加。
@@ -212,13 +236,13 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 
 ### S4　13:00 後 policy：carry vs aggressive
 
-- [ ] `(a) carry`：13:00 後停新倉，Spot Ask exit maker 可掛至現貨收盤；未平者收盤 cancel、隔日重建，opening carry 商品當日維持 exit-only。Expiry 前一交易日（依交易日曆）13:00 起取消 passive exit 並以可執行 taker/taker 強制平；該 QuoteCode 自此永久 entry-block，不得在 expiry 日早盤重新開倉。
-- [ ] `(b) aggressive`：13:00 起第一條 exit route改為 Spot A1 peg；加入第二條 route後才有 Future B1 peg，不把兩 route 假裝同掛。13:20 cancel passive peg，對所有 residual 用 L1–L5 taker/taker hard flatten；深度不足／5 秒 retry仍失敗要列 `flatten_failure`，不能宣稱已歸零。
-- [ ] Forced expiry與13:20 flatten 重用 S3 primitive，按 `position_id`／一個 futures-equivalent unit依 FIFO 執行。Spot-exit scenario先賣 Spot taker，Future-exit scenario先買 Future taker；從 policy trigger起到 `min(trigger+5s, first-leg venue session_end)`，須先越過相關 passive-order cancel barrier，再找本腿 L1–L5足量且 limiter可送的 cursor整單執行。第一腿始終不成立時原 paired unit不變、記 daily attempt `flatten_attempt_timeout`、不釋放；成功後50 ms另一腿走共同 B6。第二腿成功才分別記 `expiry_forced_flat`／`aggressive_hard_flat`並在其 execution cursor釋放該 unit capacity；第二腿 timeout後 rollback成功則恢復原 paired unit、記 `flatten_rollback_restored`，rollback失敗才留 naked unresolved，一律不釋放。
-- [ ] Forced expiry／13:20 都是新 executable route；不得沿用 13:30 non-executable paired accounting mark冒充成交。
+- [ ] `(a) carry`：13:00 後停新倉，Spot Ask exit maker 可掛至現貨收盤；未平者收盤 cancel、隔日重建，opening carry 商品當日維持 exit-only。該 QuoteCode 到 expiry 不再開新 entry；真正仍 paired open 的少量 residual 以 expiry 日 spot close 同時標 spot／future、basis=0 結清並釋放容量，明標 `expiry_basis_zero_accounting`。
+- [ ] `(b) aggressive`：13:00 起第一條 exit route改為 Spot A1 peg；加入第二條 route後才有 Future B1 peg，不把兩 route 假裝同掛。13:20 cancel passive peg，對所有 residual 用 L1–L5 taker/taker hard flatten；這是刻意犧牲至少一個 maker tick的風險／容量 control，不是 frozen-lower route。深度不足／5 秒 retry仍失敗要列 `flatten_failure`，不能宣稱已歸零。
+- [ ] 13:20 hard flatten 重用 S3 primitive，按 `position_id`／一個 futures-equivalent unit依 FIFO 執行。Spot-exit scenario先賣 Spot taker，Future-exit scenario先買 Future taker；「先賣／先買」只描述 hard-flatten 的 initiating first leg，不是正常 lower 出場。從 trigger起到 `min(trigger+5s, first-leg venue session_end)`，須先越過相關 passive-order cancel barrier，再找本腿 L1–L5足量且相應市場有送單額度的 cursor整單執行。第一腿始終不成立時原 paired unit不變、記 daily attempt `flatten_attempt_timeout`、不釋放；成功後50 ms另一腿走共同 B6。第二腿成功才記 `aggressive_hard_flat`並在其 execution cursor釋放該 unit capacity；第二腿 timeout後 rollback成功則恢復原 paired unit、記 `flatten_rollback_restored`，rollback失敗才留 naked unresolved，一律不釋放。
+- [ ] `expiry_basis_zero_accounting` 是非 executable terminal convention；`aggressive_hard_flat` 是新 executable route。兩者在 ledger、完成率與 request load 中完全分開，不把 accounting mark 冒充成交。
 - [ ] Carry 與 aggressive 各自從相同 candidate stream 做完整 joint-scheduler／B6／FIFO／reservation／20M ledger replay；新 exit hedge與hard-flatten request必須回饋 entry actual send、hedge execution、position time與後續 FIFO。不能只替既有 accepted cohort換 exit，因 limiter競爭及較早 release都會改隔日 admission。
 - [ ] 分兩層比較：matched admitted cohort 的直接 exit 收益犧牲，以及 full sequential replay 新增 admission 後的總效果。
-- [ ] `flatten_attempt_timeout / flatten_rollback_restored` 是 attempt／daily state，不是 terminal；兩者都保留 `paired_open`、`carried_eod=true`，下一 eligible session重新掛 exit並再套 close policy。Terminal taxonomy固定至少含 `aggressive_hard_flat / expiry_forced_flat / entry_partial_rollback_flat / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved / horizon_censored_open / unresolved`；只有實際 flat、rollback失敗的 naked unresolved或reporting-horizon censor才寫最終 outcome。固定報：日均 net、同日完成率、隔日開盤可用容量 TWD／%、overnight notional-days、forced-cross cost、flatten attempts／failures、matched-cohort sacrifice、replacement entries net。`aggressive full-sequential mean_daily_net − carry` 為正才回答「在目前已建模成本下經濟上值得」。
+- [ ] `flatten_attempt_timeout / flatten_rollback_restored` 是 attempt／daily state，不是 terminal；兩者都保留 `paired_open`、`carried_eod=true`，下一 eligible session重新掛 exit並再套 close policy。Terminal taxonomy固定至少含 `aggressive_hard_flat / expiry_basis_zero_accounting / entry_partial_rollback_flat / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved / horizon_censored_open / unresolved`；只有實際 flat、expiry paired accounting、rollback失敗的 naked unresolved或reporting-horizon censor才寫最終 outcome。固定報：日均 net、同日完成率、隔日開盤可用容量 TWD／%、overnight notional-days、forced-cross cost、expiry accounting count／notional、flatten attempts／failures、matched-cohort sacrifice、replacement entries net。`aggressive full-sequential mean_daily_net − carry` 為正才回答「在目前已建模成本下經濟上值得」。
 
 輸出：`doc/quote_fill/CLOSE_POLICY_CARRY_VS_AGGRESSIVE_<YYYYMMDD>.md` 與 S4 bundle。
 
@@ -254,3 +278,4 @@ S0 8 月歸因 → S1 七組 policy（Spot Bid）→ S2 Future Ask 對照
 | 8/22 q95 baseline | `order_message_load_*`、`one_second_makerfill_*`、`dynamic_future_hedge_*`、`dynamic_expiry_paired_close_*`、`dynamic_estimated_path_portfolio_*`、`august_exit_extension_*` | 230M | S0 baseline；S1 等價 q95 bundle 驗證後才可另議清理 |
 | A/B1–2 決策證據 | `makerfill_rank_l1_l5_sample_20260820_v5`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1` | 13M | 僅支持 A/B1–2 與五日 calibration prior |
 | 八日 pilot | `fair_mid/`、`quote_fill/`、`quote_width/` | 110M | 歷史診斷，不作 S1–S5 績效分母 |
+| S0.5 基礎重驗 | `foundation_revalidation_s05_20260825_v1` | 137M | anchor／q／cohort／known-cost geometry；非execution／EV，selected-anchor lookup 重建的依據 |

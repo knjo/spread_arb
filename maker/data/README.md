@@ -74,7 +74,7 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `pseudo_validation_stable_core_products.csv` | v6日期／市場別tick ladder下，兩 route 皆達 80% core 的68檔研究池；非 production |
 | `complete.json` | 八個 publication artifacts 的 hash／bytes與source lineage |
 
-## `walkforward/` 現況（2026-08-24 清理後）
+## `walkforward/` 現況（2026-08-25）
 
 固定 45 檔時代的 execution／exit maker／cross-session／post-cross／prequential／aggressive／compact 產物（約 42 GB 含 invalid 快照）已全部刪除；
 資料不可復原，需依 `doc/REWORK_PLAN_20260824.md` 在因果 manifest 上重跑。目前只保留：
@@ -87,5 +87,6 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `makerfill_rank_l1_l5_sample_20260820_v5/`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1/` | 「只掛 A/B1–2」決策的五日證據 |
 | `august_attribution_s0_20260824_v2/` | S0 canonical q95 quote-only歸因；`cap=∞`、非20M策略回放 |
 | `august_attribution_s0_30_session_challenger_20260824_v1/` | S0 30-session market-only sensitivity；無scheduler／queue／makerFill且不進shortlist |
+| `foundation_revalidation_s05_20260825_v1/` | S0.5 canonical：71日 anchor、censor-aware q calibration／rank、q-independent broad cohort與七組known-cost geometry；非execution／EV |
 
 `august_attribution_s0_20260824_v1/` 有 explicit L1 clear scalar forward-fill 錯誤，已由 v2 supersede，不得引用。
