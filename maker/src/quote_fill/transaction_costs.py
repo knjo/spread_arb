@@ -6,8 +6,35 @@ Extracted from the deleted fixed-45 ``combined_cost_cap_sweep`` module on
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PairedCycleCostBreakdown:
+    """Exact per-leg charges for one completed paired cycle."""
+
+    spot_entry_commission_twd: float
+    spot_exit_commission_twd: float
+    spot_exit_tax_twd: float
+    futures_entry_tax_twd: float
+    futures_exit_tax_twd: float
+    futures_entry_commission_twd: float
+    futures_exit_commission_twd: float
+
+    @property
+    def total_twd(self) -> float:
+        return sum(
+            (
+                self.spot_entry_commission_twd,
+                self.spot_exit_commission_twd,
+                self.spot_exit_tax_twd,
+                self.futures_entry_tax_twd,
+                self.futures_exit_tax_twd,
+                self.futures_entry_commission_twd,
+                self.futures_exit_commission_twd,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -49,6 +76,137 @@ class TransactionCostProfile:
     def futures_round_trip_commission_twd(self) -> float:
         return 2.0 * self.futures_commission_twd_per_side
 
+    def spot_commission_twd(self, price: float, shares: float) -> float:
+        """Return the commission for one executed spot leg."""
+
+        self.validate()
+        price = _positive_finite(price, "price")
+        shares = _positive_finite(shares, "shares")
+        return (
+            price
+            * shares
+            * self.spot_commission_bp_per_side
+            / 10_000.0
+        )
+
+    def spot_sell_tax_twd(
+        self,
+        price: float,
+        shares: float,
+        *,
+        same_day: bool,
+    ) -> float:
+        """Return tax for one executed spot sell leg.
+
+        ``same_day`` describes the actually matched spot quantity.  It does
+        not follow from a futures hedge or a nominal strategy branch.
+        """
+
+        self.validate()
+        price = _positive_finite(price, "price")
+        shares = _positive_finite(shares, "shares")
+        if not isinstance(same_day, bool):
+            raise TypeError("same_day must be boolean")
+        multiplier = self.same_day_spot_sell_tax_multiplier if same_day else 1.0
+        return (
+            price
+            * shares
+            * self.spot_sell_tax_bp
+            * multiplier
+            / 10_000.0
+        )
+
+    def futures_tax_twd(self, price: float, share_equivalent: float) -> float:
+        """Return transaction tax for one executed stock-futures leg."""
+
+        self.validate()
+        price = _positive_finite(price, "price")
+        share_equivalent = _positive_finite(
+            share_equivalent,
+            "share_equivalent",
+        )
+        return (
+            price
+            * share_equivalent
+            * self.futures_tax_bp_per_side
+            / 10_000.0
+        )
+
+    def futures_commission_twd(self, contracts: float) -> float:
+        """Return broker commission for one executed futures leg."""
+
+        self.validate()
+        contracts = _positive_finite(contracts, "contracts")
+        return contracts * self.futures_commission_twd_per_side
+
+    def paired_cycle_cost_breakdown(
+        self,
+        *,
+        entry_spot_price: float,
+        exit_spot_price: float,
+        entry_future_price: float,
+        exit_future_price: float,
+        shares: float,
+        contracts: float = 1.0,
+        same_day: bool,
+    ) -> PairedCycleCostBreakdown:
+        """Price every executed leg of a completed paired cycle exactly."""
+
+        if not isinstance(same_day, bool):
+            raise TypeError("same_day must be boolean")
+        return PairedCycleCostBreakdown(
+            spot_entry_commission_twd=self.spot_commission_twd(
+                entry_spot_price,
+                shares,
+            ),
+            spot_exit_commission_twd=self.spot_commission_twd(
+                exit_spot_price,
+                shares,
+            ),
+            spot_exit_tax_twd=self.spot_sell_tax_twd(
+                exit_spot_price,
+                shares,
+                same_day=same_day,
+            ),
+            futures_entry_tax_twd=self.futures_tax_twd(
+                entry_future_price,
+                shares,
+            ),
+            futures_exit_tax_twd=self.futures_tax_twd(
+                exit_future_price,
+                shares,
+            ),
+            futures_entry_commission_twd=self.futures_commission_twd(
+                contracts
+            ),
+            futures_exit_commission_twd=self.futures_commission_twd(
+                contracts
+            ),
+        )
+
+    def paired_cycle_cost_twd(
+        self,
+        *,
+        entry_spot_price: float,
+        exit_spot_price: float,
+        entry_future_price: float,
+        exit_future_price: float,
+        shares: float,
+        contracts: float = 1.0,
+        same_day: bool,
+    ) -> float:
+        """Return the total exact cost for one completed paired cycle."""
+
+        return self.paired_cycle_cost_breakdown(
+            entry_spot_price=entry_spot_price,
+            exit_spot_price=exit_spot_price,
+            entry_future_price=entry_future_price,
+            exit_future_price=exit_future_price,
+            shares=shares,
+            contracts=contracts,
+            same_day=same_day,
+        ).total_twd
+
     def validate(self) -> None:
         if not self.profile_id:
             raise ValueError("transaction cost profile_id must be nonempty")
@@ -66,3 +224,15 @@ class TransactionCostProfile:
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.same_day_spot_sell_tax_multiplier > 1:
             raise ValueError("same-day tax multiplier cannot exceed one")
+
+
+def _positive_finite(value: float, name: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be finite and positive")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite and positive") from error
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
