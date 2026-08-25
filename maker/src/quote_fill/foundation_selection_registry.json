@@ -1,0 +1,180 @@
+{
+  "registry_version": "foundation_selection_s05_rebuild_registry_v1",
+  "frozen_on": "2026-08-25",
+  "development_only": true,
+  "source_start": "20260126",
+  "source_end": "20260813",
+  "protected_forward_start": "20260814",
+  "primary_start": "20260505",
+  "analysis_start_second": 300,
+  "entry_stop_second": 14400,
+  "anchor": {
+    "primary_horizon": {
+      "id": "future_median_30_300s",
+      "start_seconds": 30,
+      "end_seconds": 300,
+      "minimum_coverage": 0.9
+    },
+    "sensitivity_horizons": [
+      {
+        "id": "future_median_10_60s",
+        "start_seconds": 10,
+        "end_seconds": 60,
+        "minimum_coverage": 0.9
+      },
+      {
+        "id": "future_median_300_900s",
+        "start_seconds": 300,
+        "end_seconds": 900,
+        "minimum_coverage": 0.9
+      }
+    ],
+    "actionable_candidates": [
+      {"id": "time_ewma_15s", "kind": "wall_clock_ewma", "half_life_seconds": 15},
+      {"id": "time_ewma_30s", "kind": "wall_clock_ewma", "half_life_seconds": 30},
+      {"id": "time_ewma_60s", "kind": "wall_clock_ewma", "half_life_seconds": 60},
+      {"id": "time_ewma_120s", "kind": "wall_clock_ewma", "half_life_seconds": 120},
+      {"id": "time_median_60s", "kind": "wall_clock_rolling_median", "window_seconds": 60, "minimum_samples": 30},
+      {"id": "time_median_120s", "kind": "wall_clock_rolling_median", "window_seconds": 120, "minimum_samples": 60}
+    ],
+    "controls": [
+      {"id": "count_ewma_30obs", "kind": "legal_observation_ewma", "half_life_observations": 30},
+      {"id": "count_ewma_120obs", "kind": "legal_observation_ewma", "half_life_observations": 120},
+      {"id": "persistence", "kind": "current_legal_basis", "q_eligible": false},
+      {"id": "open_5m", "kind": "frozen_opening_median", "q_eligible": true}
+    ],
+    "selection": {
+      "primary_metric": "four_month_equal_common_support_product_day_mae_bp",
+      "within_product_day_weighting": "eligible_one_second_occupancy_equal",
+      "within_month_weighting": "product_day_equal",
+      "across_month_weighting": "month_equal",
+      "comparison_support": "all_actionable_anchor_candidates_common_seconds; controls_do_not_constrain_support",
+      "secondary_metrics": ["p95_abs_error_bp", "coverage", "anchor_tv_over_basis_tv"],
+      "bootstrap": {
+        "kind": "paired_moving_whole_date_blocks",
+        "block_sessions": 5,
+        "replicates": 5000,
+        "seed": 20260825,
+        "stratification": "resample_contiguous_market_session_blocks_independently_within_each_month_then_equal_weight_months",
+        "replicate_reduction": "carry_each_sampled_Date_product_day_loss_sum_and_count_then_recompute_month_product_day_mean"
+      },
+      "top_two_rule": "raw_mae_winner_plus_smoothest_actionable_model_within_paired_one_se; if identical use next_lowest_mae",
+      "q_primary_anchor": "rank1_selected_anchor_only",
+      "q_diagnostic_anchors": ["rank2_actionable", "count_ewma_120obs"],
+      "q_diagnostic_candidate_subset": ["Q1_trail60_date_equal", "Q2_trail20_date_equal"]
+    }
+  },
+  "boundary": {
+    "episode_window": {
+      "start_second_inclusive": 300,
+      "entry_stop_second_exclusive": 14400,
+      "active_at_entry_stop": "right_censored_with_reason_entry_stop",
+      "post_entry_extrema_forbidden": true,
+      "left_censored_excluded_from_primary": true
+    },
+    "quantiles": [50, 80, 95],
+    "sides": ["positive", "negative"],
+    "nominal_tail_probability": {"50": 0.5, "80": 0.2, "95": 0.05},
+    "minimum_completed_per_side": {"50": 100, "80": 200, "95": 400},
+    "base_candidates": [
+      {"id": "Q0_trail60_event_pooled", "kind": "event_pooled_completed_control", "lookback_sessions": 60, "minimum_dates": 40, "allow_primary_selection": false},
+      {"id": "Q1_trail60_date_equal", "kind": "date_equal_censor_identified", "lookback_sessions": 60, "minimum_dates": 40},
+      {"id": "Q2_trail20_date_equal", "kind": "date_equal_censor_identified", "lookback_sessions": 20, "minimum_dates": 15},
+      {"id": "Q3_shape60_level5", "kind": "trail60_product_shape_global_level_scale", "shape_candidate": "Q1_trail60_date_equal", "lookback_sessions": 60, "level_sessions": 5, "minimum_level_dates": 4, "minimum_level_observable_cells_per_side": 500, "minimum_dates": 40, "fallback_candidate": "Q1_trail60_date_equal"},
+      {"id": "Q4_shape60_level10", "kind": "trail60_product_shape_global_level_scale", "shape_candidate": "Q1_trail60_date_equal", "lookback_sessions": 60, "level_sessions": 10, "minimum_level_dates": 8, "minimum_level_observable_cells_per_side": 1000, "minimum_dates": 40, "fallback_candidate": "Q1_trail60_date_equal"},
+      {"id": "Q5_prev1_expiry_dte5", "kind": "prior_expiry_dte_date_equal_diagnostic", "prior_expiry_cycles": 1, "dte_radius_calendar_days": 5, "minimum_dates": 5, "allow_primary_selection": false},
+      {"id": "Q6_prev2_expiry_dte5", "kind": "prior_expiry_dte_date_equal", "prior_expiry_cycles": 2, "dte_radius_calendar_days": 5, "minimum_dates": 8, "fallback_candidate": "Q1_trail60_date_equal"}
+    ],
+    "history_point_estimator": "date_equal_completed_quantile_clipped_to_censor_identified_range",
+    "q6_fallback_atomicity": "for_each_product_day_x_tod_x_side_require_the_complete_q50_q80_q95_native_triplet; otherwise replace_the_complete_side_triplet_with_Q1; never_mix_native_and_fallback_quantiles_within_a_side",
+    "global_scale": {
+      "grid_start": 0.5,
+      "grid_end": 1.5,
+      "grid_step": 0.01,
+      "q_cells_share_side_specific_scale": true,
+      "scale_dimensions": ["anchor_model_id", "candidate_id", "side"],
+      "training_dates": "last_N_frozen_market_sessions_strictly_before_target_Date",
+      "training_unit": "observable_product_day_tod_q_side_cell",
+      "primary_loss_reduction": "product_day_tod_equal_within_Date_then_Date_equal_then_q_equal_for_each_side",
+      "primary_loss": "distance_from_nominal_tail_probability_to_censor_identified_reach_interval",
+      "tie_break": ["mean_absolute_interval_midpoint_error", "absolute_distance_to_scale_one", "smaller_scale"],
+      "fallback_semantics": "if_shape_or_scale_not_native_use_same_days_effective_fallback_boundary_and_record_fallback_used"
+    },
+    "tod_buckets": [
+      {"id": "0905_1000", "start_second": 300, "end_second": 3600},
+      {"id": "1000_1100", "start_second": 3600, "end_second": 7200},
+      {"id": "1100_1200", "start_second": 7200, "end_second": 10800},
+      {"id": "1200_1300", "start_second": 10800, "end_second": 14400}
+    ],
+    "tod_rule": "episode_start_bucket_is_frozen_until_center_return_gap_or_entry_stop",
+    "tod_candidates": {
+      "source_candidates": "top_two_selectable_base_candidates_ranked_on_development",
+      "id_suffix": "__tod10",
+      "lookback_sessions": 10,
+      "grid_start": 0.5,
+      "grid_end": 1.5,
+      "grid_step": 0.01,
+      "scale_dimensions": ["anchor_model_id", "source_candidate_id", "tod_bucket", "side"],
+      "share_across_quantiles": true,
+      "minimum_training_dates": 8,
+      "minimum_observable_cells_per_bucket_side": 100,
+      "primary_loss_reduction": "product_day_equal_within_Date_then_Date_equal_then_q_equal",
+      "tie_break": ["mean_absolute_interval_midpoint_error", "absolute_distance_to_scale_one", "smaller_scale"],
+      "fallback_multiplier": 1.0
+    },
+    "selection": {
+      "anchor_scope": "rank1_selected_anchor_only; rank2_and_count120_are_diagnostics",
+      "comparison_unit": ["Date", "ValueCode", "QuoteCode", "tod_bucket", "boundary_quantile", "side"],
+      "observable_cell_rule": "n_started_positive; zero_episode_cells_are_undefined_and_excluded_identically_on_common_support",
+      "comparison_support": "all_selectable_candidates_common_effective_product_day_tod_q_side_support",
+      "primary_loss_reduction": "product_day_tod_equal_within_Date; Date_equal_within_month; take_max_over_month_x_quantile_x_side",
+      "primary_loss": "distance_from_nominal_tail_probability_to_censor_identified_reach_interval",
+      "worst_month_loss": "max_over_month_of_equal_weight_mean_over_quantile_x_side_after_Date_equal_product_day_tod_loss",
+      "amplitude_absolute_error_bp": "Date_equal_mean_absolute_error_between_prediction_and_target_completed_inverse_empirical_quantile_where_defined",
+      "native_all_q_coverage": "share_of_exact_mapped_product_day_x_four_tod_units_with_native_q50_q80_q95_on_both_sides; denominator_is_not_conditioned_on_calibration_rows",
+      "daily_cross_product_spearman": "mean_finite_Spearman_by_Date_x_tod_x_quantile_x_side_with_minimum_20_products",
+      "temporal_product_spearman_minimum_dates": 20,
+      "boundary_turnover": "Date_equal_median_absolute_log_ratio_to_previous_market_session_for_same_ValueCode_x_tod_x_quantile_x_side_on_exact_common_observable_support",
+      "temporal_spearman_primary_product_key": "ValueCode",
+      "rerank_sequence": "rank_all_five_selectable_base_candidates; build_TOD10_variants_only_for_the_base_top_two; rerank_the_five_base_candidates_plus_those_two_TOD10_variants_on_one_exact_common_support",
+      "top_two_rule": "lexicographic_ranks_one_and_two_among_allow_primary_selection_candidates",
+      "tie_break": ["worst_month_loss", "amplitude_absolute_error_bp", "native_all_q_coverage", "daily_cross_product_spearman", "boundary_turnover", "simpler_candidate"],
+      "base_simpler_candidate_order": ["Q1_trail60_date_equal", "Q2_trail20_date_equal", "Q3_shape60_level5", "Q4_shape60_level10", "Q6_prev2_expiry_dte5"],
+      "final_simpler_candidate_order": "the_base_simpler_candidate_order_followed_by_the_two_TOD10_variants_in_their_base_rank_order",
+      "report_native_support": true,
+      "report_common_support": true,
+      "report_temporal_spearman_by_product": true
+    }
+  },
+  "convergence": {
+    "build_for": "top_two_entry_q_candidates_on_selected_anchor",
+    "touch_definition": "first_causal_residual_touch_of_that_historical_days_D_safe_upper",
+    "entry_touch_stop_second_exclusive": 14400,
+    "tracking_end_second": 15600,
+    "episode_contract": "exclude_session_or_gap_left_censored_positive_episodes; after_legal_upper_touch_track_through_center_and_immediately_following_negative_cycle",
+    "history_windows_sessions": [20, 60],
+    "history_weighting": "Date_equal",
+    "minimum_history_dates": {"20": 15, "60": 40},
+    "minimum_completed_paths": {"20": 50, "60": 100},
+    "conditional_floor_censor_interval": "completed_path_exact; right_censored_path_interval_observed_floor_to_infinity",
+    "candidates": [
+      {"id": "C0_center", "kind": "residual_zero"},
+      {"id": "C1_independent_lower_control", "kind": "marginal_negative_excursion_q"},
+      {"id": "C2_conditional_reach80", "kind": "post_touch_floor_quantile", "target_reach": 0.8, "amplitude_quantile": 20},
+      {"id": "C3_conditional_reach50", "kind": "post_touch_floor_quantile", "target_reach": 0.5, "amplitude_quantile": 50}
+    ],
+    "right_censor_reasons": ["eligibility_gap", "session_cutoff"],
+    "primary_metrics": ["reach_lower_bound", "reach_upper_bound", "time_to_hit_p50_seconds", "time_to_hit_p90_seconds"],
+    "review_weighting": "pool_observable_touched_paths_for_the_descriptive_candidate_review; additionally_report_exact_common_touched_episode_sensitivity_across_the_two_entry_q_candidates; do_not_treat_review_weighting_as_a_selection_rule",
+    "selection": "report_20_and_60_session_variants_for_C2_C3_without_declaring_a_unique_winner_before_user_review"
+  },
+  "cohort": {
+    "selection_fields": ["mapping_support", "selected_anchor_support", "selected_all_q_support", "q_independent_liquidity_history", "q_independent_hard_data_gate"],
+    "forbidden_fields": ["target_touch", "target_fill", "target_pnl", "monthly_q95_selector", "target_day_outcome"],
+    "q_independent_liquidity_gate": "long_history_gate AND recent_history_gate AND hard_data_gate; validate_identical_across_old_q50_q80_rows",
+    "forbidden_liquidity_fields": ["boundary_parameter_gate", "support_gate", "pre_replay_candidate", "latent_band_to_tt_band_ratio", "entry_upper_to_tt_band_ratio"],
+    "selected_anchor_support": "at_least_one_finite_causal_analysis_eligible_second_in_300_inclusive_to_14400_exclusive; coverage_is_reported_but_has_no_tuned_cutoff",
+    "s1_primary": "selected_anchor_support AND selected_effective_all_q_support AND q_independent_liquidity_gate",
+    "loser_intersection_only_for_model_comparison": true
+  }
+}
