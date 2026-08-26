@@ -1,6 +1,6 @@
 # Work Package 01：穩定中價 Basis
 
-> 2026-08-26 canonical update：S0.5 已從 anchor 開始重作，短期 30～300 秒目標選 `time_ewma_15s`，並以其 residual 重建 `Q2_trail20_date_equal` lookup 與 S1 mother；frozen exit-lower另由v2 supplement重算。下列八日 pilot、EWMA30／EWMA120判讀與預先規則只保留為歷史設計；現行結果以 [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) 及 [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) 為準。
+> 2026-08-26 canonical update：S0.5 已從 anchor 開始重作，短期 30～300 秒目標選 `time_ewma_15s`，並以其 residual 重建 `Q2_trail20_date_equal` lookup 與 S1 mother；frozen exit-lower v2 supplement亦已發布並獨立驗證。下列八日 pilot、EWMA30／EWMA120判讀與預先規則只保留為歷史設計；現行結果以 [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) 及 [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) 為準。
 
 ## 研究問題
 

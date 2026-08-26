@@ -1,22 +1,23 @@
-# S0.5 重作：盤中 anchor、D−1 q 查表與 S1 共同母體
+# S0.5 重作：盤中 anchor、D−1 q 查表、S1 共同母體與 frozen lower
 
 日期：2026-08-26
 
-狀態：**Anchor／entry-q／S1共同母體已完成；舊 convergence 已隔離，frozen-at-touch v2 supplement 待正式發布**
+狀態：**完成；anchor／entry-q／S1共同母體與 frozen-at-upper-touch convergence v2 均已 canonical 發布並通過獨立驗證。q-policy lower 選擇仍待使用者確認，S1 尚未開始**
 
 本次不是把 2026-08-25 的 S0.5 結果換一個 anchor 後直接沿用，而是從同一因果原始事實重新做完整選型：先比較盤中 anchor，再用勝出 anchor 重建 excursion、D−1 q lookup、q-independent cohort 與七組已知成本幾何。初版 convergence 事後發現逐秒重算 anchor，與 A2 submit 後凍結絕對 exit 價不一致，故其結果只留作 dynamic sensitivity；正式 conditional convergence 另以 frozen-at-upper-touch proxy 重算。2026-08-14 起的資料被鎖為 protected forward，整次 build 都沒有讀取。
 
 ## 結論
 
-S0.5 的 anchor、entry-q 與 common mother 已可作為 **可信、可重現的 S1 研究基礎**；normal-exit lower 尚待 frozen v2 完成：
+S0.5 的 anchor、entry-q、common mother 與 frozen lower geometry 已可作為 **可信、可重現的 S1 研究基礎**；它是 development baseline，不是可部署策略或 20M 獲利證據：
 
 1. 盤中中心採 `time_ewma_15s`。它只用當下以前的合法期現 book，會隨盤中狀態更新，不是盤前估一個中心後一路帶到收盤。
 2. D 日 q 距離採 `Q2_trail20_date_equal`。每個 D 日預測嚴格只用 `<D` 的最近 20 sessions；`Q2_trail20_date_equal__tod10` 留作診斷。20／60 sessions、5／10 日 level scale、prior-expiry／DTE 都已在同一 common support 比過，沒有比簡單 trail20 更好。
 3. S1 primary 母體固定為 15,638 product-days、71 sessions、244 商品。它不使用 target-day touch、fill、PnL 或舊 q95 monthly selector，七組 policy 將使用同一母體。
 4. D−1 表對隔日的商品間排序有實質預測力；同一商品跨日的 temporal ranking 很弱。q 名稱是距離級別，不能被解讀成每天固定的 50%／20%／5% 機率。
-5. Fixed15–30 的對稱幾何已完整；q50／q80／q95 原表的 lower 則是未條件化的 marginal negative-q，也就是已被 convergence 否定為 primary 的 C1 control。它只能保留作兩側 marginal reference，不能拿原 q80／q95 margin 宣稱 round trip 有利潤。
+5. Fixed15–30 的對稱幾何已完整；q50／q80／q95 原表的 lower 則是未作 post-touch conditional calibration 的 marginal negative-q，也就是 C1 wide control。它是合法的參考掛價，但不能由兩側 marginal quantile 推導 frozen exit 的完成率或 EV。
+6. Frozen v2 顯示明確 trade-off：在 q95、C2／C3 都有 lookup 的共同 cells 上，C0／C2／C3 的截至13:20 confirmed frozen-mid target reach proxy下界為95.44%／77.98%／52.82%，未作tick rounding的nominal同日已知成本後margin中位數為+0.83／+3.30／+7.47 bp。更深lower增加表面成本空間，但降低這項reach proxy；它不是executable同日完成率。
 
-S1 round-trip 前仍需先取得 frozen v2 的 C0／C2／C3 reach、coverage與成本幾何，再由使用者凍結唯一 normal-exit lower scheme及unsupported lookup行為。C0是正常 maker＋taker的center exit；C1是未作conditional calibration的wide control，不是默認fallback。正式數字出來前，本報告不沿用舊moving-anchor排名，也不偷選winner或fallback。
+若只按full-mother availability與截至13:20的frozen-mid target reach proxy，C0是 **q-policy lower 的 completion-oriented development default proposal**；C3保留為較寬成本空間sensitivity，C2作中間診斷。Fixed15–30仍依A1維持`lower=W`，不受這項proposal影響。C0不是execution completion champion，仍待使用者凍結。若要用`C2 trail20 → trail60 → residual C0`，必須建立新的composite policy ID，逐列留下fallback provenance，不能把整體冒稱`reach80`。C0是正常maker＋taker center target；C1是未作conditional calibration的wide control，不是默認fallback。
 
 ## 因果範圍與選型契約
 
@@ -51,7 +52,7 @@ Horizon sensitivity 也限制了結論外推：10～60 秒仍由 15s 勝出（MA
 - **盤中 anchor**：D 日用截至該 cursor 的合法資料動態更新，回答「現在合理的中價差在哪裡」。
 - **盤前 q lookup**：D 日開盤前已由 `<D` 歷史算好，回答「離當下 anchor 多遠才算該商品當日的 q50／q80／q95 距離」。
 
-因此新版不是把 D−1 中價差凍住整天；盤前凍住的是 distance lookup。每張實際單在 submit 時，以當下 causal anchor ± distance 換成絕對價格並鎖定；anchor之後如何漂移都不能自行製造exit hit。S0.5尚無真實submit tick，因此使用「first legal upper touch當下凍結anchor」作明示proxy。
+因此新版不是把 D−1 中價差凍住整天；盤前凍住的是 distance lookup。每張實際單在`actual_new_send_time`以當下causal anchor±distance換成絕對價格並鎖定，後續maker fill沿用同一target，不得在fill cursor重設；anchor之後如何漂移都不能自行製造exit hit。S0.5尚無真實send tick，因此使用「first legal upper touch當下凍結anchor」作明示proxy。
 
 ## 2. D−1 q lookup：trail20 勝出，TOD scale 沒有淨改善
 
@@ -101,7 +102,35 @@ Q2 在 exact common support 上的 Date-equal calibration如下；LB／UB 保留
 - C0／C2／C3是本輪正式比較；C1保留為合法但未條件化的wide maker-exit control，不稱為不可掛、也不作隱含fallback。
 - Hit／known miss／right-censored unknown分開；C2／C3 native trail20缺值才按預註冊route查trail60。`skip cell`若被選，仍保留共同mother分母並記no-trade。
 
-這只是 S0.5 upper-touch proxy，不等同S1真實submit時間或合法tick；正式 reach／coverage／lower距離將在v2 supplement發布後填入。正常lower始終是maker＋taker exit target；taker＋taker只屬獨立風險control或13:20 hard flatten。
+這只是 S0.5 upper-touch proxy，不等同S1真實submit時間、maker fill或合法tick；正常lower始終是maker＋taker exit target，taker＋taker只屬獨立風險control或13:20 hard flatten。
+
+正式 frozen path 結果如下。Upper touch最晚13:00，frozen-mid target觀察至13:20；`n started`只計upper已碰到且該candidate lookup supported的paths。LB／UB分別把right-censored unknown當miss／hit。C2／C3的fallback是同一路徑`trail20 native → trail60 fallback`，不是C0：
+
+| Entry q | Candidate | n started | Confirmed hit LB–UB | Touch→hit p50／p90 | Path fallback |
+|---:|---|---:|---:|---:|---:|
+| q50 | C0 center | 1,436,597 | **96.920–100%** | 18／282s | — |
+| q50 | C1 marginal wide control | 1,436,597 | 41.530–44.832% | 25／301s | — |
+| q50 | C2 reach80 candidate | 1,336,949 | 79.152–82.351% | 21／312s | 1.311% |
+| q50 | C3 reach50 candidate | 1,336,949 | 50.215–53.548% | 26／328s | 1.311% |
+| q80 | C0 center | 566,189 | **95.512–100%** | 23／359s | — |
+| q80 | C1 marginal wide control | 566,189 | 23.329–28.235% | 31／371s | — |
+| q80 | C2 reach80 candidate | 499,652 | 79.051–83.183% | 25／365s | 4.646% |
+| q80 | C3 reach50 candidate | 499,652 | 51.848–56.110% | 28／366s | 4.646% |
+| q95 | C0 center | 145,189 | **92.849–100%** | 25／452s | — |
+| q95 | C1 marginal wide control | 145,189 | 15.209–23.084% | 30／399s | — |
+| q95 | C2 reach80 candidate | 78,208 | 77.979–82.596% | 24／302s | 13.715% |
+| q95 | C3 reach50 candidate | 78,208 | 52.817–57.534% | 24／281s | 13.715% |
+
+q95逐月表固定在C2／C3 supported的共同cells；每月`n started`是這些cells內的started paths，三個candidate使用同一分母。排序沒有翻轉，但C2的confirmed reach在8月較低，fallback share也顯示短窗conditional lookup並非完整覆蓋：
+
+| Entry month | n started | C0 LB–UB | C2 LB–UB | C3 LB–UB | C2／C3 path fallback |
+|---|---:|---:|---:|---:|---:|
+| 2026-05 | 21,216 | 95.532–100% | 78.714–83.234% | 53.031–57.650% | 8.479% |
+| 2026-06 | 21,198 | 95.297–100% | 78.205–82.956% | 52.826–57.647% | 14.997% |
+| 2026-07 | 28,163 | 95.562–100% | 77.747–82.250% | 53.105–57.725% | 17.598% |
+| 2026-08（至 08-13） | 7,631 | 95.099–100% | 76.163–81.103% | 51.134–56.192% | 10.379% |
+
+舊 dynamic-anchor 結果在 v2 只保留為明標 sensitivity，`canonical_decision_evidence=false`。例如舊 q95 C0 confirmed LB 為 97.35%，frozen 後是 92.85%；因舊版與新版的 eligible population並非完全相同，這只能說明 moving anchor 的方向性樂觀偏誤，不能當 paired effect size。
 
 ## 4. S1 mother：不再由舊 q95 outcome proxy 選樣
 
@@ -114,7 +143,7 @@ Q2 在 exact common support 上的 Date-equal calibration如下；LB／UB 保留
 | Selected effective all-q support | 15,826 | 247 | 93.06% | 864 |
 | **q-independent liquidity gate／S1 primary** | **15,638** | **244** | **91.96%** | **188** |
 
-最後 188 筆由 109 個 long-history fail 與 79 個 hard-data fail 組成；recent-history 在這一層全部通過。Anchor 排除的 316 筆是沒有任何可用 analysis second；不是一般化的 `unsolved`。Lookup 要嘛有完整 24 cells（4 TOD × 3 q × 2 side），要嘛完全缺，沒有半套 panel。
+最後 188 筆由 109 個 long-history fail 與 79 個 hard-data fail 組成；recent-history 在這一層全部通過。Anchor 排除的 316 筆是 D 日 runtime 沒有任何合法 analysis second，不是盤前已知 gate，也不是一般化的 `unsolved`。Lookup 要嘛有完整 24 cells（4 TOD × 3 q × 2 side），要嘛完全缺，沒有半套 panel。
 
 Liquidity invariance audit 覆蓋 21,744 product-days、91 日、250 商品：每組舊 q50／q80 rows 的 source-asof、long／recent／hard gate 全部一致，21,744／21,744 通過。這證明 S1 gate 已真正移除舊 q-dependent fields，而不是把 q95 selector 換名稱。
 
@@ -132,7 +161,7 @@ Liquidity invariance audit 覆蓋 21,744 product-days、91 日、250 商品：�
 | fixed25 | 50.000 | 68.181 | 28.759 | 99.95% | 45.393 | 99.72／99.56／93.34% |
 | fixed30 | 60.000 | 76.046 | 38.759 | 100.00% | 53.451 | 100.00／99.87／99.26% |
 
-同日 known reference cost 的中位數約 21.21–21.24 bp；隔夜約 36.22–36.29 bp。原 q95 marginal band 扣同日已知成本只有 12／15,638 product-days 不為正，看似幾乎全數有利；但這正是使用不可達的 C1 lower 所造成，不能當共同 mother gate、q95 subgroup或獲利證據。
+同日 known reference cost 的中位數約 21.21–21.24 bp；隔夜約 36.22–36.29 bp。原 q95 marginal band 扣同日已知成本只有 12／15,638 product-days 不為正，看似幾乎全數有利；但它把未作 post-touch conditional calibration 的 C1 wide target當成一定可成交，不能當共同 mother gate、q95 subgroup或獲利證據。
 
 向外 tick rounding 會同時增加表面 band 與掛單深度；rounded positive share 不是免費 alpha。此表尚未包含：
 
@@ -142,20 +171,31 @@ Liquidity invariance audit 覆蓋 21,744 product-days、91 日、250 商品：�
 - exit maker fill、跨日稅差、carry／13:20 hard flatten；
 - unresolved／naked risk 與 realized cashflow。
 
-所以這一節中 fixed policies 可作合法 tick／費稅 reference；q policies 只保留為錯誤假設 control，不能證明「會賺」或「可以部署」。
+所以這一節中 fixed policies 可作合法 tick／費稅 reference；q policies 的 C1只保留為 marginal wide control，不能證明「會賺」或「可以部署」。
 
-## 6. Conditional lower 接回成本：等待 frozen v2 正式數字
+## 6. Conditional lower 接回成本：frozen v2 結果
 
-成本幾何的正確公式是 `upper_distance + lower_distance - cost`。初版C2／C3 lower來自moving-anchor convergence，故先前算出的margin、positive share與coverage全部撤回，不作決策證據。v2將按完整causal key把frozen C0／C2／C3接回同一S1 mother；每個q×candidate的共同分母固定為`15,638 × 4 = 62,552`個product-day×entry-TOD cells，unsupported cell保留在分母中，正率只在明示supported cells內另報。
+成本幾何的正確公式是 `upper_distance + lower_distance - cost`。v2按完整causal key把frozen C0／C2／C3接回同一S1 mother；每個q×candidate的共同分母固定為`15,638 × 4 = 62,552`個product-day×entry-TOD cells。Unsupported cell不從共同分母消失，但距離／margin統計只在明示supported cells上計算。
 
-正式表會同時列：
+| Entry q | C0 supported | C2／C3 supported | Coverage | 其中 trail60 fallback |
+|---:|---:|---:|---:|---:|
+| q50 | 62,552 | 58,960 | 94.258% | 1,321（2.241%） |
+| q80 | 62,552 | 49,914 | 79.796% | 5,641（11.301%） |
+| q95 | 62,552 | 15,163 | 24.241% | 3,633（23.960%） |
 
-- C0／C2／C3 的 supported cells、coverage與trail60 fallback；
-- lower distance p50、同日／隔夜 nominal known-cost margin p50與positive share；
-- path-level fallback share與mother-cell fallback share，兩種分母不混寫；
-- entry upper source、lower source、各自as-of、combined as-of、entry TOD與fallback reason。
+表中的 fallback share 是 **mother supported-cell** 分母；前節的 1.311%／4.646%／13.715% 是 **started path** 分母，兩者不可互換。C0 lower固定為0，因此在全部mother cells都有定義；C2／C3缺值不是交易失敗，而是D−1 conditional lookup尚無足夠歷史。
 
-直到v2發布並通過independent verifier前，不能回答哪個lower有足夠完成率或成本空間，也不能先選C2／C3。即使表面margin為正，它仍只是pre-replay geometry，不含makerFill、B6 hedge、exit maker、20M reservation或realized cashflow。
+為避免母體差異造成錯覺，以下只比較 q95 中 C2／C3 都 supported 的共同 cells。Reach 也重新限制在同一 common support：
+
+| Lower | Frozen-mid target reach through 13:20 LB–UB | Nominal same-day known-cost margin p50 | Nominal same-day positive | Nominal overnight known-cost margin p50 | Nominal overnight positive |
+|---|---:|---:|---:|---:|---:|
+| C0 center | **95.437–100%** | +0.827 bp | 54.30% | -14.173 bp | 11.46% |
+| C2 reach80 candidate | 77.979–82.596% | +3.302 bp | 66.65% | -11.731 bp | 16.47% |
+| C3 reach50 candidate | 52.817–57.534% | +7.466 bp | 84.93% | -7.569 bp | 24.34% |
+
+q95 common-support geometry分母是15,163 cells；reach分母是這些cells內的78,208 started paths。相對C0，C2把nominal同日margin中位數增加2.48 bp，但reach proxy下界少17.46個百分點；C3增加6.64 bp，少42.62個百分點。C0在**完整**q95 mother另有145,189 started paths，其nominal同日margin中位數為+4.478 bp、positive share 67.73%，但那包含C2／C3 unsupported cells，不能拿來與上表的C2／C3直接比較。q50、q80三者的nominal同日margin中位數都仍為負；outward tick-rounded reference另有較高表面margin，但會同時改變掛單深度與fill機率，不能當免費edge。q95只是值得送進execution replay的pre-replay geometry，不是已實現edge。
+
+每列已保存 entry upper source、lower source、兩者各自as-of、combined as-of、entry TOD與fallback reason。任何positive-margin subgroup都只能是預註冊診斷，不能反過來改q-independent mother。上述數字仍不含makerFill、B6 executable hedge、exit maker queue、20M chronological reservation或realized cashflow。
 
 ## 現在已解決與尚未解決
 
@@ -163,7 +203,7 @@ Liquidity invariance audit 覆蓋 21,744 product-days、91 日、250 商品：�
 |---|---|---|
 | 盤中中價差是否因果、穩定 | 已選 `time_ewma_15s` | S1 共用 |
 | D−1 q 對隔日是否有預測性 | 跨商品排序強；絕對 level／同商品 temporal 仍有限 | Q2 frozen baseline；8/14+ forward |
-| 哪些商品具已知成本後幾何 | Fixed完整；q-policy C1只作marginal control；C0／C2／C3待frozen v2 | v2完成後才凍結lower與unsupported規則 |
+| 哪些商品具已知成本後幾何 | 已完成frozen C0／C2／C3；q95有正向nominal pre-replay幾何，q50／q80 nominal中位數仍負 | 使用者確認q-policy lower與unsupported規則後進S1 |
 | 舊 `unsolved` 是什麼 | 已拆成 anchor、all-q、liquidity support funnel；convergence unknown 另以 censor reason 保留 | 不再用 generic `unsolved` |
 | maker entry 是否成交 | 未解 | S1 B5 approximate，S5 exact |
 | hedge 是否可執行／滑多少 | 未解 | S1 B6 |
@@ -184,22 +224,39 @@ Selection canonical（anchor／entry-q／mother）：[`foundation_selection_s05_
 - Final publication：51 artifacts、1,069,627,493 bytes；`complete=true`。
 - Independent `verify-only`：anchor 71／71、episodes 131／131、boundary base／final／rank、convergence facts／predictions 131／131、final publication 全部通過；protected forward 起日仍為 20260814。
 
-上列v1的anchor、entry-q與mother仍有效；其中moving-anchor convergence只准作sensitivity。Frozen-at-touch v2將以獨立atomic supplement發布，直接hash v1 marker、hidden boundary checkpoint與逐日raw inputs；正式path／geometry數字與v2 hash待完成後補入。
+上列v1的anchor、entry-q與mother仍有效；其中moving-anchor convergence只准作sensitivity。
 
-Build：
+Frozen convergence canonical：[`foundation_selection_s05_frozen_convergence_20260826_v2`](../../data/walkforward/foundation_selection_s05_frozen_convergence_20260826_v2/)
+
+- Source code commit：`20e330c66d0632de25f22e112d66f56276b55961`。
+- Registry SHA-256：`bd6ddda5fde082e5cb66638b87785ce81215c6b322ba80b1cef1729ef73f0958`。
+- Session-list SHA-256：`4781a479f4c04b6d53fe206035a89c1bb7a83ecc8d2796266aac6467bb7bc6cd`。
+- `complete.json` SHA-256：`ce98f293729588a05904ccb1e97a2902054f201e32fd25c2c1d7d61e960f45c9`。
+- Marker payload SHA-256：`e54b2d7c1089095571586e12af69d90fe2c30d7e135b2135132e5d67dae04ead`。
+- Final checkpoint fingerprint：`bab0488ee10e3b247f1d393bac648bf7fb1f5fb0c6e5c851460a851291dab8a4`。
+- Final publication：18 artifacts、474,477,654 artifact bytes；`complete=true`。
+- Independent `verify-only`：630,264 boundary rows、3,308,148 frozen fact rows、750,624 effective predictions、8,125,568 path scores、562,968 support-audit rows、435,730 conditional-geometry rows全部重驗通過；semantics固定為`frozen_anchor_at_upper_touch`。
+
+v2直接pin v1 source／registry／final marker／hidden boundary checkpoint，final lineage再包含逐日frozen facts；protected forward起日仍為20260814。Publication正確標示facts／scores含D日outcome、predictions／geometry不含D日outcome，且`development_only=true`、`deployment_baseline_approved=false`、`actionable_execution=false`、`ev_ready=false`。
+
+Frozen v2 supplement build：
 
 ```bash
 UV_CACHE_DIR=/tmp/codex-uv-cache \
 uv run --no-project --with polars \
-  python -u -m maker.src.quote_fill.foundation_selection_runner all --execute
+  python -u -m maker.src.quote_fill.foundation_frozen_convergence_runner \
+  publish --execute
 ```
 
-不重算、只驗證既有 checkpoint 與 final publication：
+不重算、只驗證既有frozen checkpoint與final publication：
 
 ```bash
 UV_CACHE_DIR=/tmp/codex-uv-cache \
 uv run --no-project --with polars \
-  python -u -m maker.src.quote_fill.foundation_selection_runner verify-only
+  python -u -m maker.src.quote_fill.foundation_frozen_convergence_runner \
+  verify-only
 ```
 
-131 個 daily source markers 都是既有 `migrated_nonatomic` lineage，沒有可回溯的 atomic writer provenance。因此 final bundle 雖有完整 input／checkpoint hash chain，仍正確標示 `development_only=true`、`deployment_baseline_approved=false`；這個限制不能靠 verifier 消除。
+Selection v1是source commit `ace2669...`與runner v1簽名的immutable canonical；current HEAD的selection runner已升為v2，不能拿它直接resume／verify v1 work root。Frozen v2 verifier會pin並重驗v1 source、registry、final marker與hidden boundary checkpoint，這是current HEAD的正式驗證入口。若要從零重建v1，必須在記錄的source commit與獨立output/work root執行，不能覆寫canonical目錄。
+
+發布流程外、文件定稿前另行執行的380個unittest tests、Ruff與pycompile均通過；canonical publication另由獨立verifier驗證。131個daily source markers仍是既有`migrated_nonatomic` lineage，沒有可回溯的atomic writer provenance；這個限制不能靠verifier消除。

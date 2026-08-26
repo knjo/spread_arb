@@ -28,9 +28,14 @@ MAE 為 8.722 bp；它只用當下以前的合法 book 動態更新，不是把�
 Spearman 只有 0.142，因此可作距離／排序 baseline，不能把 q95 解讀成每天固定 5% 機率。
 
 重建後的 S1 common mother 是 15,638 product-days、71 sessions、244 商品，不用 target touch／fill／PnL 或舊 q95
-selector 選樣。七組 policy 的共同 geometry也揭露一項重要修正：原 q-policy negative side是未條件化的 C1 control，
-不能當正常 exit lower。舊 C0／C2／C3 convergence 又以逐秒移動的 anchor 判斷，與 A2「submit 後鎖定絕對
-exit 價」不一致，現已降級為 sensitivity；正式 lower 結論須以 upper touch 當下凍結 anchor 的 v2 supplement 重算。
+selector 選樣。七組 policy 的共同 geometry也揭露一項重要修正：原 q-policy negative side是未作post-touch
+conditional calibration的C1 wide control，不能直接當正常exit lower。舊C0／C2／C3 convergence又以逐秒移動的
+anchor判斷，與A2「submit後鎖定絕對exit價」不一致，現已降級為sensitivity。
+
+Frozen-at-upper-touch v2 已正式發布並通過獨立驗證。q95全mother的C0截至13:20 frozen-mid target reach proxy為92.849–100%；在C2／C3
+都有lookup的共同cells上，C0／C2／C3 reach為95.437–100%／77.979–82.596%／52.817–57.534%，未作tick rounding的
+nominal同日已知成本後margin p50為+0.827／+3.302／+7.466 bp。更深lower換到較大表面margin，但降低reach proxy；C2／C3 q95 cell coverage
+又只有24.241%。若只按full-mother availability與reach proxy，C0是q-policy lower的completion-oriented development default proposal，仍待使用者確認；fixed15–30維持`lower=W`。這不是executable同日完成率。
 完整結果、hash與限制見
 [`doc/quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md`](doc/quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md)；
 2026-08-25 的 [`FOUNDATION_REVALIDATION_S05_20260825.md`](doc/quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md)
@@ -43,9 +48,9 @@ exit 價」不一致，現已降級為 sensitivity；正式 lower 結論須以 u
 diagnostic。取樣仍用 SpreadPairTotalCount epoch 與 1 Hz final-net；entry只掛 A/B1–2；hedge基準為
 `fill RecvTime + 50 ms`，當下不可執行才依 B6 往後最多5秒找第一個合法足量 book。
 
-S1 round-trip 開跑前仍要用 frozen-at-touch v2 正式比較 C0／C2／C3，再凍結唯一 normal-exit lower scheme、
-unsupported lookup 行為與預註冊 subgroup；在重算完成前不沿用舊 moving-anchor 排名。七組仍全跑共同 mother，
-不加 policy-specific mother gate。S0是`cap=∞` quote-only診斷；S0.5是
+S1 round-trip 開跑前只剩凍結唯一normal-exit lower scheme、unsupported lookup行為與預註冊subgroup。七組仍全跑
+共同mother，不加policy-specific mother gate。若採C2→C0，必須建立明示composite policy ID，不能冒稱reach80。
+S0是`cap=∞` quote-only診斷；S0.5是
 known-cost pre-replay foundation；兩者都不可直接當成20M績效或可部署baseline。
 
 既有 `../taker/` 是獨立的 taker 研究線，本目錄不依賴它。

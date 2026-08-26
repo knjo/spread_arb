@@ -4,7 +4,7 @@
 
 決策基線：nested repo commit `0c3e5ad`
 
-狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0、S0.5 anchor／entry-q／S1 mother 已完成。舊 convergence 使用 moving anchor，已隔離為 sensitivity；frozen-at-upper-touch v2 正在正式重算，完成前不凍結 lower 或開始 S1**。完成一項就在本文件打勾並填結果與 bundle 連結。
+狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0與S0.5完整完成。舊moving-anchor convergence已隔離；frozen-at-upper-touch v2已canonical發布並通過獨立驗證。S1尚未開始，只剩使用者確認q-policy lower與unsupported行為**。完成一項就在本文件打勾並填結果與 bundle 連結。
 
 ## 研究定位（使用者定義）
 
@@ -20,7 +20,7 @@
 | 題 | 決定 |
 |---|---|
 | A1 界線 policy | `q50 / q80 / q95` ＋固定對稱 `15 / 20 / 25 / 30 bp`，共 7 組，全跑 |
-| A2 出場下緣 | frozen（submit 當下鎖 `anchor − lower`）；dynamic 只當 sensitivity |
+| A2 出場下緣 | frozen；S1在`actual_new_send_time`以當下causal anchor鎖定絕對lower，後續maker fill沿用該target，不得在fill cursor重設。S0.5以first legal upper touch凍結作明示proxy；dynamic只當sensitivity |
 | A3 8 月惡化 | 先查再跑 A1。假說：8 月價差波動縮、溢價消失（界線碰到率掉）vs 界線掛太深（碰到後成交率掉） |
 | B4 期貨 Ask maker route | 加回來當對照；不做雙 entry route 同掛 |
 | B5 成交標籤 | S0–S4 的 Spot Bid **entry** A/B1–2 大範圍 screening 使用 legacy `makerFill` fast adapter；明標 approximate，S5 才對凍結組合做一次同樣本 exact entry 校準。Future maker 與 pooled FIFO exit 不適用 makerFill，分別照 S2／S3 使用 indexed replay |
@@ -82,14 +82,14 @@
 ### Development 資料與因果邊界
 
 - S0 歷史歸因固定使用 `monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`，SHA-256 `9f1bcddf17eff968ee51e0decdb04736a3747f0665886ce3e4fd26031cfb5891`；原 manifest 是 2026-05-04～2026-08-13 共 72 sessions、3,886 product-days，terminal／cashflow 追至 2026-08-21 共 78 reporting sessions。它是用 q95／Spot-Bid proxy 選出的 conditional matched sample，只保留成 bridge／sensitivity；其中落在 S0.5 的 71 個 full-60 sessions 且進入 broad cohort者是 3,846 product-days，兩個數字不可混用。
-- S0.5 primary development panel 是 2026-05-05～2026-08-13 共 71 sessions；2026-01-26～2026-08-13 的 131 sessions只供嚴格 `<D` history，2026-08-14 起 protected forward 未讀取。盤中 anchor 已凍結為 `time_ewma_15s`，D-safe entry q 已凍結為 `Q2_trail20_date_equal`；winner 身分使用 71 日 development outcomes，故明標 development-selected，不冒充 untouched forward。
+- S0.5 primary development panel 是 2026-05-05～2026-08-13 共 71 sessions；2026-01-26～2026-08-13 的 131 sessions只供嚴格 `<D` history，2026-08-14 起 protected forward 未讀取。盤中 anchor 已凍結為 `time_ewma_15s`，D-safe entry q 已凍結為 `Q2_trail20_date_equal`；frozen lower用first legal upper touch當S0.5 proxy。Winner身分使用71日development outcomes，故明標development-selected，不冒充untouched forward。
 - S1／S2 不得依 policy／route outcome 各自重選。共同母體固定為 `foundation_selection_s05_rebuild_20260826_v1/s1_mother.parquet` 中 `s1_primary=true` 的 15,638 product-days、71 sessions、244 商品；七組共用。舊 q95 matched manifest 只列 bridge／sensitivity。
 - Entry q baseline 固定為 `Q2_trail20_date_equal`：正負側分開、最多最近 20 sessions、至少 15 日、嚴格 `<D`。`Q2_trail20_date_equal__tod10` 只作 diagnostic；rolling-60、5／10 日 level scale、prior-expiry／DTE 都已在同一 common support 比較，不再於 S1 outcome 後 fine-tune。
 - S5 的 September 不重用舊 q95 manifest；它使用最終凍結的 selected-anchor、cohort／selector config，再逐日套 `<D` boundary／liquidity。
 
 ### 共用 order、position 與 accounting 狀態
 
-- 抽出共用 `PolicySpec(policy_id, kind, upper_distance_bp, lower_distance_bp, source_asof)`；message-load、makerFill adapter、S2 execution target builder、hedge、path、cap 與 S5 exact 都讀同一份 spec。
+- 抽出共用 `PolicySpec(policy_id, kind, upper_distance_bp, lower_distance_bp, upper_source_id, lower_source_id, upper_source_asof_date, lower_source_asof_date, combined_source_asof_date, entry_tod_bucket, fallback_reason, ...)`；message-load、makerFill adapter、S2 execution target builder、hedge、path、cap與S5 exact都讀同一份spec。D−1 lookup盤前只凍結distance；`actual_new_send_time`才以當下causal anchor±distance轉成absolute price並鎖定，後續fill不得重設。Fixed policy用constant provenance，不偽造lookup as-of。
 - Policy 不放進 raw order identity。相同 `Date / ValueCode / QuoteCode / route / stage / maker_side / absolute_price_tick / start_cursor / lifecycle` 共用 `raw_order_fact_id`；這就是唯一的 physical-order lifecycle ID，不另建語意重疊的 `physical_order_id`。另用 `candidate_intent_id` 銜接 scheduler 前的同一掛單意圖、`policy_alias_id` 表示反事實 policy。跨 policy 絕不相加。
 - Working-order 狀態至少為 `intent_pending → working_reserved → entry_maker_partial / filled / actual_cancelled / session_expired`；coalesced 或到 nominal stop仍未實際送出的 new不建立 `raw_order_fact_id`。Position狀態至少為 `maker_filled → hedge_pending → paired_open → exit_in_progress → flat`；另有 `entry_partial_rollback_pending / exit_partial_rollback_pending / entry_partial_unresolved / exit_partial_unresolved / entry_hedge_timeout_unresolved / exit_hedge_timeout_unresolved` unpaired risk states，絕不餵給只接受 `paired_open` 的 S3 FIFO controller。
 - 任一 cursor 的 `total_committed_notional = working_unfilled_reservation + entry_partial_exposure_notional + hedge_pending_notional + paired_open_notional + exit_in_progress_committed_notional`，global 不得超過 20M、單商品不得超過 10M；狀態轉移不重複計額。Entry partial 的 filled exposure＋leaves reservation不得超過原 reservation；exit partial／hedge pending把整個 futures-equivalent unit 從 `paired_open` 移到 `exit_in_progress`，仍按原 position notional計額。每個 reservation／transfer／reconcile／release timestamp 必須可由逐列 ledger 重算。
@@ -139,7 +139,8 @@
 
 ```text
 S0 8 月歸因 → S0.5 anchor／selected lookup／S1 mother（已完成）
-                       → frozen-at-touch convergence／geometry（重算中）
+                       → frozen-at-touch convergence／geometry（已完成）
+                       → 使用者確認 q-policy lower／unsupported 規則
                                       ↓
               S1 七組 Spot Bid → S2 Future Ask → S3 exit maker
                                                      ↓
@@ -147,7 +148,7 @@ S0 8 月歸因 → S0.5 anchor／selected lookup／S1 mother（已完成）
 ```
 
 1. S0 只診斷，不看結果改七組 primary grid；30-session 只能另列 sensitivity。
-2. S0.5 已選 `time_ewma_15s`、`Q2_trail20_date_equal` 並發布 common S1 mother；normal-exit lower 必須以 upper touch／submit 當下凍結的絕對價重算。它不選 execution champion，也不發布 PnL。
+2. S0.5已選`time_ewma_15s`、`Q2_trail20_date_equal`，發布common S1 mother與frozen-at-upper-touch lower證據。它不選execution champion，也不發布PnL；若只按full-mother availability與截至13:20的reach proxy，C0是q-policy lower的completion-oriented development default proposal，仍待使用者確認。Fixed15–30維持`lower=W`。
 3. S1 跑 7 組，依共同規則留最多 2 組 finalist。
 4. S2 只跑這 2 組；兩 route backend／sampling 不 pooling，完成後重選最多 2 個 entry finalist。
 5. S3 對 entry finalists 先跑第一條 exit route。「跑通」只指 partitions、schema、ledger invariants、verifier 與 tests 通過，與 PnL 無關；工程完成即加第二條 route，再留最多 2 個 entry×exit finalist。
@@ -174,28 +175,31 @@ S0 8 月歸因 → S0.5 anchor／selected lookup／S1 mother（已完成）
 - [x] 以 30～300 秒 future median、product-day／month equal 與 5-session paired whole-Date block bootstrap 選出 `time_ewma_15s`；30s 留 rank-2 diagnostic，長 horizon 另列 sensitivity。
 - [x] 以 15s residual 從頭重建 131 日 censor-aware episodes，不沿用 EWMA120 distance；每日 prediction嚴格 `source_asof_date < Date`。
 - [x] 在同一 common support 選出 `Q2_trail20_date_equal`；TOD10 rank-2 只作 diagnostic，60-session／level5／level10／prior-expiry 都未勝出。
-- [ ] 以 `frozen_anchor_at_upper_touch` proxy 重建 conditional convergence：C0 center、C1 wide control、C2 reach80、C3 reach50；20／60 日與 resolved fallback都保存。舊逐秒 moving-anchor結果只作 sensitivity，不進lower決策。
+- [x] 以 `frozen_anchor_at_upper_touch` proxy 重建 conditional convergence：C0 center、C1 wide control、C2 reach80、C3 reach50；20／60 日與 resolved fallback都保存。舊逐秒 moving-anchor結果只作 sensitivity，不進lower決策。
 - [x] 建立 q-independent cohort；`s1_mother.parquet` 保存 17,006 mapping rows，`s1_primary=true` 為 15,638 product-days、71 日、244 商品，每筆完整 4 TOD×3q×2side。
 - [x] 對七組 policy 共用 S1 mother 計 marginal two-sided control geometry；逐列確認 q-policy lower 等於 C1 independent negative-q control，不能冒充正常 conditional exit。
-- [ ] 以 frozen-at-touch v2 發布 C0／C2／C3 resolved supported geometry與缺值 audit；全部固定 `actionable_execution=false`、`ev_ready=false`。
-- [x] 以 clean source commit 發布 51-artifact atomic checkpoint bundle；獨立 `verify-only` 通過，2026-08-14 起 protected forward 未讀取。
+- [x] 以 frozen-at-touch v2 發布 C0／C2／C3 resolved supported geometry與缺值 audit；全部固定 `actionable_execution=false`、`ev_ready=false`。
+- [x] 以clean source commit發布selection v1的51-artifact atomic checkpoint bundle；獨立`verify-only`通過。
+- [x] 以clean source commit發布frozen v2的18-artifact atomic supplement；獨立`verify-only`重驗所有lineage／hash／row counts通過，2026-08-14起protected forward未讀取。
 
-階段結果（2026-08-26）：[`FOUNDATION_SELECTION_S05_REBUILD_20260826.md`](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md)。短期盤中中心選 `time_ewma_15s`（30～300 秒 month-equal MAE 8.722 bp）；entry q 選 `Q2_trail20_date_equal`（cross-product Spearman 0.626、same-product temporal Spearman 0.142，屬弱 temporal signal）。Canonical selection bundle 為 `maker/data/walkforward/foundation_selection_s05_rebuild_20260826_v1`，`complete.json` SHA-256 `de7f6d1dddcdbe18875acfb4965d165cc9af6387ec8b02d1e8d55c5766531d60`。其中 moving-anchor convergence不得用於 lower；frozen-at-touch v2 supplement完成後才補正式 reach／coverage／geometry。2026-08-25 舊報告與 bundle保留為 predecessor，不再作S1 handoff。
+階段結果（2026-08-26）：[`FOUNDATION_SELECTION_S05_REBUILD_20260826.md`](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md)。短期盤中中心選 `time_ewma_15s`（30～300秒month-equal MAE 8.722 bp）；entry q選`Q2_trail20_date_equal`（cross-product Spearman 0.626、same-product temporal Spearman 0.142，屬弱temporal signal）。Selection bundle為`maker/data/walkforward/foundation_selection_s05_rebuild_20260826_v1`，`complete.json` SHA-256 `de7f6d1dddcdbe18875acfb4965d165cc9af6387ec8b02d1e8d55c5766531d60`。
+
+Frozen supplement為`maker/data/walkforward/foundation_selection_s05_frozen_convergence_20260826_v2`，source commit `20e330c66d0632de25f22e112d66f56276b55961`，`complete.json` SHA-256 `ce98f293729588a05904ccb1e97a2902054f201e32fd25c2c1d7d61e960f45c9`，independent `verify-only`通過。q95全mother的C0截至13:20 frozen-mid target reach proxy為92.849–100%；在C2／C3都有lookup的共同cells上，C0／C2／C3 proxy為95.437–100%／77.979–82.596%／52.817–57.534%，未作tick rounding的nominal同日已知成本後margin p50為+0.827／+3.302／+7.466 bp。這不是executable同日完成率。C2／C3 q95 cell coverage只有24.241%，不能刪掉unsupported母體或把composite冒稱reach80。舊moving-anchor結果只作sensitivity；2026-08-25舊報告與bundle保留為predecessor。
 
 S1 前 handoff：
 
 - [x] Anchor／entry q／共同 cohort 已凍結：15s／Q2 trail20／15,638 product-days。
-- [ ] Frozen v2完成後比較 C0／C2／C3，凍結唯一 primary lower scheme；C0是合法 maker＋taker center exit，C1只是未作conditional calibration的wide control，不能默認作fallback。
-- [ ] 依 frozen v2 的實際coverage凍結 unsupported行為：`skip cell`保留共同mother分母並作no-trade，或明訂C2→C0 composite／其他hierarchical fallback；不得刪樣或把composite整體標為reach80。
+- [ ] 依frozen v2凍結q-policy lower scheme。若只按full-mother availability與截至13:20的frozen-mid target reach proxy，C0 center是completion-oriented development default proposal；C3保留成本空間sensitivity、C2作中間診斷。這不是executable completion champion。Fixed15–30仍依A1維持`lower=W`；C1只是未作conditional calibration的wide control，不能默認作fallback。
+- [ ] 若不選C0，依v2實際coverage凍結unsupported行為：`skip cell`保留共同mother分母並作no-trade，或明訂`C2 trail20 → trail60 → residual C0`等新composite policy；不得刪樣或把composite整體標為reach80。
 - [ ] Known-cost positive 不作 q-independent mother gate；建議七組全跑，只把**選定 conditional lower 後**的 causal positive-margin flag列為預註冊 subgroup，等待使用者確認。
 - [x] Expiry paired residual 採使用者指定的 spot-close／spot-close、basis=0 accounting convention；非 executable、非 same-day completion。
 
 ### S1　七組 policy × Spot Bid maker route
 
-- [ ] S0.5 selected-anchor excursion／entry-q／broad-cohort canonical rebuild 已完成；待 frozen-at-touch convergence supplement正式發布並凍結lower／缺值規則後，S1才可執行。S1不得回接EWMA120 distance或moving-anchor exit結果。
+- [ ] S0.5 selected-anchor excursion／entry-q／broad-cohort與frozen-at-touch supplement均已canonical發布；待使用者凍結q-policy lower／缺值規則後，S1即可執行。S1不得回接EWMA120 distance或moving-anchor exit結果。
 - [ ] 先建立共用 `PolicySpec`，把 `one_second_message_load_runner` 的 q95 常數／target／admission 泛化；不能只改下游 `attach_q95_boundaries`。
 - [ ] `one_second_makerfill_runner.attach_q95_boundaries` 改為 `attach_boundaries(policy_spec)`；q 組讀 D-1 distance，fixed 組為 `upper=lower=W` 並保存 constant-policy provenance。
-- [ ] `dynamic_estimated_path_portfolio.py` 移除 `frozen to q95`；每筆 position 保存 submit 當下 frozen lower。Delayed hedge 的 path 從**實際 hedge execution**後下一完整秒開始，不再硬要求恰為 fill+50 ms。
+- [ ] `dynamic_estimated_path_portfolio.py` 移除 `frozen to q95`；每筆 position 保存`actual_new_send_time`鎖定的frozen lower，fill cursor不得重設。Delayed hedge 的 path 從**實際 hedge execution**後下一完整秒開始，不再硬要求恰為 fill+50 ms。
 - [ ] 依 B6 改成完整 raw-state retry；現有 sparse loader 忽略 non-book TrialMatch state，不能只把 as-of query 延長 5 秒。
 - [ ] Cap config 只跑 `TWD 20,000,000`、`per_product_fraction=0.50`，並把 config／hash 寫入 bundle；不得沿用預設 10–50M／30%。Primary engine 在 entry new 實際送出前做 reservation，不能先收 fill 再用舊 chronological filter挑 admission。
 - [ ] 每個 policy 各自跑單一 chronological event loop：共同 ingest candidate intents、raw state、potential makerFill、reservation、現貨／期貨兩套送單額度、hedge／rollback與terminal事件。Actual new時才建立 potential fill；actual cancel／expiry由 loop產生並回填 active interval，不能先預算 cancel再跑 fill。輸出根目錄含 `<policy_id>_<run_id>`。
@@ -284,4 +288,5 @@ S1 前 handoff：
 | A/B1–2 決策證據 | `makerfill_rank_l1_l5_sample_20260820_v5`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1` | 13M | 僅支持 A/B1–2 與五日 calibration prior |
 | 八日 pilot | `fair_mid/`、`quote_fill/`、`quote_width/` | 110M | 歷史診斷，不作 S1–S5 績效分母 |
 | S0.5 predecessor | `foundation_revalidation_s05_20260825_v1` | 137M | 歷史重驗；已由完整 selected-anchor rebuild 取代 |
-| S0.5 完整重作 | `foundation_selection_s05_rebuild_20260826_v1` | 1,021M | 15s anchor／Q2 trail20／conditional convergence／S1 mother／C1-control geometry；非execution／EV |
+| S0.5 selection v1 | `foundation_selection_s05_rebuild_20260826_v1` | 1,021M | 15s anchor／Q2 trail20／S1 mother／marginal geometry；moving-anchor convergence只作sensitivity |
+| S0.5 frozen supplement v2 | `foundation_selection_s05_frozen_convergence_20260826_v2` | 453M | frozen-at-upper-touch C0–C3 reach、C0／C2／C3 support與known-cost geometry；非execution／EV |

@@ -20,7 +20,7 @@ src/
 │   │              foundation_cohort_selection、foundation_selected_geometry、
 │   │              foundation_selection_stats／registry → foundation_selection_runner
 │   ├── S0.5 frozen lower v2：foundation_frozen_convergence_runner
-│   │                            （upper-touch凍結絕對exit reference的獨立supplement）
+│   │                            （已canonical發布的upper-touch frozen supplement）
 │   ├── 引擎：engine、replay、indexed_replay、layered、merged、raw_tape、targets、partial、
 │   │         hedge、hedge_study、execution_facts、execution_runner、pilot、study、
 │   │         exit_maker、exit_maker_study（期貨 route 與 exit maker 重作時借用）
@@ -55,21 +55,12 @@ python -m maker.src.quote_fill.foundation_selection_runner all --execute
 各 runner 的 `--help` 與 `--verify-only` 是正式介面；輸出根目錄由各模組常數指定，重跑前先看
 `maker/doc/quote_fill/README.md` 對應文件。
 
-S0.5 selection v1 build（anchor／Q2／mother；既有moving-anchor convergence只作sensitivity）：
+S0.5 selection v1（anchor／Q2／mother；既有moving-anchor convergence只作sensitivity）是source commit
+`ace2669dbc3c725a94baa035494b9bef10701304`與runner v1簽名的immutable canonical。Current HEAD的selection runner已升為v2，
+不得用它resume／verify v1 work root；若要從零重建v1，須在該source commit與獨立output／work root執行。
+Current HEAD由下列frozen v2 verifier pin並重驗v1 marker／boundary lineage。
 
-```bash
-UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
-  python -u -m maker.src.quote_fill.foundation_selection_runner all --execute
-```
-
-不重算、只驗證 checkpoint／publication／protected-forward boundary：
-
-```bash
-UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
-  python -u -m maker.src.quote_fill.foundation_selection_runner verify-only
-```
-
-Frozen-at-upper-touch convergence v2（正式發布需clean commit）：
+Frozen-at-upper-touch convergence v2（已canonical發布；新publication仍需clean commit）：
 
 ```bash
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \

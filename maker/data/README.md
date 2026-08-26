@@ -88,6 +88,7 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `august_attribution_s0_20260824_v2/` | S0 canonical q95 quote-only歸因；`cap=∞`、非20M策略回放 |
 | `august_attribution_s0_30_session_challenger_20260824_v1/` | S0 30-session market-only sensitivity；無scheduler／queue／makerFill且不進shortlist |
 | `foundation_selection_s05_rebuild_20260826_v1/` | **S0.5 selection canonical**：15s盤中anchor、Q2 trail20 D-safe lookup、15,638筆S1 primary mother與C1-control／fixed geometry；其中 moving-anchor convergence只作 sensitivity，不作lower決策 |
+| `foundation_selection_s05_frozen_convergence_20260826_v2/` | **S0.5 frozen canonical supplement**：first legal upper touch凍結absolute center，發布C0–C3 reach、C0／C2／C3 lookup support與known-cost geometry；`actionable_execution=false`、`ev_ready=false` |
 | `foundation_revalidation_s05_20260825_v1/` | S0.5 predecessor：EWMA120基礎重驗與重作依據；不得作現行S1 lookup |
 
 `august_attribution_s0_20260824_v1/` 有 explicit L1 clear scalar forward-fill 錯誤，已由 v2 supersede，不得引用。

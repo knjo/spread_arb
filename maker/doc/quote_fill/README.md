@@ -21,9 +21,9 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md](MAKERFILL_L1_L5_DIAGNOSTIC_20260820.md) | 五日 BID1–2 vs BID3–5 exact fill 與 hedge slip | 「只掛 A/B1–2」決策證據 |
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
 | [AUGUST_ATTRIBUTION_20260824.md](AUGUST_ATTRIBUTION_20260824.md) | S0 q95 raw-excursion touch vs post-touch queue 歸因、30-session sensitivity | **完成；兩者並列** |
-| [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5 從頭選 15s anchor／Q2 trail20、S1 mother並重算frozen lower | **anchor／q／mother完成；frozen v2待發布** |
+| [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5 從頭選 15s anchor／Q2 trail20、S1 mother並重算frozen lower | **完整完成；lower選擇待確認** |
 | [FOUNDATION_REVALIDATION_S05_20260825.md](FOUNDATION_REVALIDATION_S05_20260825.md) | 舊 EWMA120 基礎重驗與重作理由 | 歷史 predecessor；不得作現行 S1 lookup |
-| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0完成；S0.5 frozen lower重算中；S1未開始** |
+| [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0／S0.5完成；S1未開始** |
 
 ## Archive（固定 45 檔、有 universe leakage）
 
@@ -36,5 +36,5 @@ prequential challenger、cost/cap sweep、aggressive 13:00、compact evaluator�
 `maker/data/walkforward/` 的現行層包含基礎事實（`daily`、`rolling_boundaries`、`liquidity`、`sessions.txt`、
 `exact_contract_calendar_v1.parquet`、`expiry_daily_close_facts_20260821_v1`）、因果 manifest、8/22 六個 causal 輸出、
 兩個 L1–L5 診斷 bundle、S0 canonical／30-session sensitivity bundle，以及現行 S0.5
-`foundation_selection_s05_rebuild_20260826_v1`；`foundation_revalidation_s05_20260825_v1`只保留為 predecessor。S0 舊 v1 有 explicit L1 clear
+`foundation_selection_s05_rebuild_20260826_v1`與`foundation_selection_s05_frozen_convergence_20260826_v2`；`foundation_revalidation_s05_20260825_v1`只保留為 predecessor。S0 舊 v1 有 explicit L1 clear
 forward-fill 錯誤，僅 v2 可引用；詳細 hash 與重跑方式見上述 S0 文件。

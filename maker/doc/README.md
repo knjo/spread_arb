@@ -20,9 +20,9 @@
 | [quote_fill/README.md](quote_fill/README.md) | 因果 pipeline 各段結果索引 | **現行主線入口** |
 | [SKILLS.md](SKILLS.md)、[ASSIGNMENTS.md](ASSIGNMENTS.md) | 能力邊界、work packages | 後續依 S0–S5 實作同步更新 |
 | [quote_fill/AUGUST_ATTRIBUTION_20260824.md](quote_fill/AUGUST_ATTRIBUTION_20260824.md) | S0：8 月 q95 market／boundary vs queue 歸因 | **完成；兩者並列** |
-| [quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5：15s anchor、Q2 trail20、S1 mother與frozen lower重算 | **anchor／q／mother完成；frozen v2待發布** |
+| [quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5：15s anchor、Q2 trail20、S1 mother與frozen lower重算 | **完整完成；lower選擇待確認** |
 | [quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md) | S0.5 前一版 anchor／q 基礎重驗 | 歷史 predecessor |
-| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0完成；S0.5 frozen lower v2重算中；S1未開始** |
+| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0／S0.5完成；S1未開始** |
 
 文件規則：
 
