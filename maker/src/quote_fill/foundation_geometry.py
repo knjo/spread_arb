@@ -265,6 +265,8 @@ def summarize_policy_geometry(frame: pl.DataFrame) -> pl.DataFrame:
         pl.col("Date").n_unique().alias("sessions"),
         pl.col("ValueCode").n_unique().alias("products"),
         pl.col("nominal_band_bp").median().alias("nominal_band_bp_p50"),
+        pl.col("upper_distance_bp").median().alias("upper_distance_bp_p50"),
+        pl.col("lower_distance_bp").median().alias("lower_distance_bp_p50"),
         pl.col("rounded_reference_band_bp")
         .median()
         .alias("rounded_reference_band_bp_p50"),

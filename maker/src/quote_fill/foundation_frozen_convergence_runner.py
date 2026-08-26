@@ -1377,10 +1377,10 @@ def publish_frozen_convergence_supplement(
         "conditional_geometry_summary": geometry_overall.select(
             "policy_id",
             "product_day_tod_rows",
-            "lower_distance_p50_bp",
-            "nominal_same_day_known_cost_margin_p50_bp",
+            "lower_distance_bp_p50",
+            "nominal_same_day_known_cost_margin_bp_p50",
             "nominal_same_day_known_cost_positive_share",
-            "nominal_overnight_known_cost_margin_p50_bp",
+            "nominal_overnight_known_cost_margin_bp_p50",
             "nominal_overnight_known_cost_positive_share",
         ).to_dicts(),
         "prepublish_validation": "passed",

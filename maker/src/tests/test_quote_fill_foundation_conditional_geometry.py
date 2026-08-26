@@ -32,6 +32,8 @@ class FoundationConditionalGeometryTest(unittest.TestCase):
         self.assertEqual(result.support_audit.height, 4 * 3 * 3)
         self.assertEqual(result.geometry_long.height, 4 * 3 * 3 - 1)
         self.assertEqual(result.summary_overall.height, 9)
+        self.assertIn("upper_distance_bp_p50", result.summary_overall.columns)
+        self.assertIn("lower_distance_bp_p50", result.summary_overall.columns)
         self.assertEqual(result.summary_by_month.height, 9)
         self.assertEqual(result.summary_by_tod.height, 4 * 9)
         self.assertEqual(result.support_summary.height, 9 + 9 + 4 * 9)
