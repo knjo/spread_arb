@@ -19,6 +19,8 @@ from maker.src.quote_fill.foundation_frozen_convergence_runner import (
     _summarize_frozen_primary,
     _UpstreamContext,
     _validate_destinations,
+    _validate_frozen_fact_reference,
+    _validate_frozen_path_reference,
 )
 from maker.src.quote_fill.foundation_selection_runner import atomic_publish_checkpoint
 
@@ -128,6 +130,41 @@ class FrozenConvergenceRunnerContractTest(unittest.TestCase):
             result.item(0, "nominal_overnight_known_cost_positive_share"),
             0.25,
         )
+
+    def test_frozen_reference_formulas_accept_valid_rows_and_reject_drift(self) -> None:
+        facts = pl.DataFrame(
+            {
+                "convergence_reference_semantics": [
+                    "frozen_anchor_at_upper_touch"
+                ],
+                "touch_anchor_basis_bp": [10.0],
+                "frozen_center_basis_bp": [10.0],
+                "independent_lower_distance_bp": [3.0],
+                "frozen_independent_lower_basis_bp": [7.0],
+            }
+        )
+        paths = pl.DataFrame(
+            {
+                "convergence_reference_semantics": [
+                    "frozen_anchor_at_upper_touch"
+                ],
+                "frozen_center_basis_bp": [10.0],
+                "threshold_distance_bp": [3.0],
+                "frozen_exit_basis_bp": [7.0],
+            }
+        )
+        _validate_frozen_fact_reference(facts)
+        _validate_frozen_path_reference(paths)
+        with self.assertRaisesRegex(ValueError, "fact reference formulas"):
+            _validate_frozen_fact_reference(
+                facts.with_columns(
+                    pl.lit(9.0).alias("frozen_independent_lower_basis_bp")
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "path-score exit formula"):
+            _validate_frozen_path_reference(
+                paths.with_columns(pl.lit(8.0).alias("frozen_exit_basis_bp"))
+            )
 
     def test_fact_checkpoint_is_branded_with_supplement_runner(self) -> None:
         with TemporaryDirectory() as directory:

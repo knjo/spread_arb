@@ -906,6 +906,45 @@ def _reach_by_month(path_scores: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(parts, how="vertical_relaxed")
 
 
+def _validate_frozen_fact_reference(facts: pl.DataFrame) -> None:
+    if facts.is_empty():
+        raise ValueError("frozen convergence facts are empty")
+    if facts.filter(
+        (pl.col("convergence_reference_semantics") != CONVERGENCE_REFERENCE_SEMANTICS)
+        | (
+            (
+                pl.col("touch_anchor_basis_bp")
+                - pl.col("frozen_center_basis_bp")
+            ).abs()
+            > EPS_BP
+        )
+        | (
+            (
+                pl.col("frozen_center_basis_bp")
+                - pl.col("independent_lower_distance_bp")
+                - pl.col("frozen_independent_lower_basis_bp")
+            ).abs()
+            > EPS_BP
+        )
+    ).height:
+        raise ValueError("frozen fact reference formulas drifted")
+
+
+def _validate_frozen_path_reference(path_scores: pl.DataFrame) -> None:
+    if path_scores.filter(
+        (pl.col("convergence_reference_semantics") != CONVERGENCE_REFERENCE_SEMANTICS)
+        | (
+            (
+                pl.col("frozen_center_basis_bp")
+                - pl.col("threshold_distance_bp")
+                - pl.col("frozen_exit_basis_bp")
+            ).abs()
+            > EPS_BP
+        )
+    ).height:
+        raise ValueError("frozen path-score exit formula drifted")
+
+
 def _validate_frozen_frames(
     facts: pl.DataFrame,
     effective: pl.DataFrame,
@@ -916,22 +955,7 @@ def _validate_frozen_frames(
     *,
     primary_mother_rows: int,
 ) -> None:
-    if facts.is_empty():
-        raise ValueError("frozen convergence facts are empty")
-    if facts.filter(
-        (pl.col("convergence_reference_semantics") != CONVERGENCE_REFERENCE_SEMANTICS)
-        | (
-            pl.col("touch_anchor_basis_bp") - pl.col("frozen_center_basis_bp")
-        ).abs()
-        > EPS_BP
-        | (
-            pl.col("frozen_center_basis_bp")
-            - pl.col("independent_lower_distance_bp")
-            - pl.col("frozen_independent_lower_basis_bp")
-        ).abs()
-        > EPS_BP
-    ).height:
-        raise ValueError("frozen fact reference formulas drifted")
+    _validate_frozen_fact_reference(facts)
     validate_convergence_prediction_lineage(effective)
     expected_effective_rows = primary_mother_rows * 4 * 3 * 4
     if effective.height != expected_effective_rows:
@@ -957,16 +981,7 @@ def _validate_frozen_frames(
         | (pl.col("effective_lookup_id") != "structural_zero")
     ).height:
         raise ValueError("C0 is not a full structural-zero prediction")
-    if path_scores.filter(
-        (pl.col("convergence_reference_semantics") != CONVERGENCE_REFERENCE_SEMANTICS)
-        | (
-            pl.col("frozen_center_basis_bp")
-            - pl.col("threshold_distance_bp")
-            - pl.col("frozen_exit_basis_bp")
-        ).abs()
-        > EPS_BP
-    ).height:
-        raise ValueError("frozen path-score exit formula drifted")
+    _validate_frozen_path_reference(path_scores)
     if path_scores.filter(~pl.col("contains_target_day_outcome")).height:
         raise ValueError("evaluation path scores lack target-day outcome labeling")
     if set(reach["convergence_candidate_id"].unique().to_list()) != {
