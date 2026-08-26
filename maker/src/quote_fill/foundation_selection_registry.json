@@ -1,6 +1,6 @@
 {
-  "registry_version": "foundation_selection_s05_rebuild_registry_v1",
-  "frozen_on": "2026-08-25",
+  "registry_version": "foundation_selection_s05_rebuild_registry_v2",
+  "frozen_on": "2026-08-26",
   "development_only": true,
   "source_start": "20260126",
   "source_end": "20260813",
@@ -149,19 +149,23 @@
   "convergence": {
     "build_for": "top_two_entry_q_candidates_on_selected_anchor",
     "touch_definition": "first_causal_residual_touch_of_that_historical_days_D_safe_upper",
+    "reference_semantics": "frozen_anchor_at_upper_touch",
+    "frozen_center_formula": "selected_anchor_bp_at_upper_touch",
+    "frozen_lower_formula": "frozen_center_basis_bp_minus_threshold_distance_bp",
+    "dynamic_anchor_results_role": "noncanonical_sensitivity_only",
     "entry_touch_stop_second_exclusive": 14400,
     "tracking_end_second": 15600,
-    "episode_contract": "exclude_session_or_gap_left_censored_positive_episodes; after_legal_upper_touch_track_through_center_and_immediately_following_negative_cycle",
+    "episode_contract": "exclude_session_or_gap_left_censored_positive_episodes; after_legal_upper_touch freeze the anchor absolute basis; track through that frozen center and its immediately following frozen-reference negative cycle",
     "history_windows_sessions": [20, 60],
     "history_weighting": "Date_equal",
     "minimum_history_dates": {"20": 15, "60": 40},
     "minimum_completed_paths": {"20": 50, "60": 100},
     "conditional_floor_censor_interval": "completed_path_exact; right_censored_path_interval_observed_floor_to_infinity",
     "candidates": [
-      {"id": "C0_center", "kind": "residual_zero"},
+      {"id": "C0_center", "kind": "frozen_touch_anchor_center"},
       {"id": "C1_independent_lower_control", "kind": "marginal_negative_excursion_q"},
-      {"id": "C2_conditional_reach80", "kind": "post_touch_floor_quantile", "target_reach": 0.8, "amplitude_quantile": 20},
-      {"id": "C3_conditional_reach50", "kind": "post_touch_floor_quantile", "target_reach": 0.5, "amplitude_quantile": 50}
+      {"id": "C2_conditional_reach80", "kind": "frozen_touch_anchor_post_touch_floor_quantile", "target_reach": 0.8, "amplitude_quantile": 20},
+      {"id": "C3_conditional_reach50", "kind": "frozen_touch_anchor_post_touch_floor_quantile", "target_reach": 0.5, "amplitude_quantile": 50}
     ],
     "right_censor_reasons": ["eligibility_gap", "session_cutoff"],
     "primary_metrics": ["reach_lower_bound", "reach_upper_bound", "time_to_hit_p50_seconds", "time_to_hit_p90_seconds"],

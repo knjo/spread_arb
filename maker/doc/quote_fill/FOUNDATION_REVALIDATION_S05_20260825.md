@@ -1,5 +1,7 @@
 # S0.5：查表基礎重驗
 
+> **Superseded（2026-08-26）：** 本文件是 EWMA120 predecessor，只保留歷史脈絡；不得作現行 S1 lookup、lower 或策略結論。現行 15s anchor、Q2 trail20、共同 mother 與 frozen-at-touch convergence 以 [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](FOUNDATION_SELECTION_S05_REBUILD_20260826.md) 為準。
+
 日期：2026-08-25
 
 狀態：**完成；canonical development bundle 已發布，但不是 execution／EV 結論**

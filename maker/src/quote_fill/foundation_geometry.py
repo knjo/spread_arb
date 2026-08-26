@@ -74,9 +74,6 @@ def build_policy_geometry(
     the four fixed controls on exactly the same product-days as the q policies.
     """
 
-    profile = cost_profile or TransactionCostProfile()
-    profile.validate()
-    scenarios = _normalise_adverse_scenarios(adverse_sensitivity_bp)
     cohort = _prepare_cohort(broad_cohort)
     boundary_sample = boundary_wide.join(
         cohort.select(list(KEYS)),
@@ -147,10 +144,86 @@ def build_policy_geometry(
             "nominal_band_bp"
         )
     )
-    _validate_policy_distances(policies)
-    result = _add_reference_geometry(policies, profile, scenarios)
+    result = build_reference_policy_geometry(
+        policies,
+        cost_profile=cost_profile,
+        adverse_sensitivity_bp=adverse_sensitivity_bp,
+    )
     _validate_output_coverage(result, cohort.height)
     return result.sort([*KEYS, "policy_order"])
+
+
+def build_reference_policy_geometry(
+    policies: pl.DataFrame,
+    *,
+    cost_profile: TransactionCostProfile | None = None,
+    adverse_sensitivity_bp: Iterable[float] = DEFAULT_ADVERSE_SENSITIVITY_BP,
+    allow_zero_lower: bool = False,
+) -> pl.DataFrame:
+    """Add exact opening-reference cost geometry to prepared policy rows.
+
+    This is the reusable row-level primitive beneath the seven-policy adapter.
+    Callers must provide one already identified policy per row, including its
+    D-safe source lineage, reference prices, and upper/lower distances.  The
+    normal foundation lookup keeps both distances strictly positive.  A
+    conditional post-entry convergence target may legitimately resolve to the
+    center, so such callers can explicitly allow a zero lower distance without
+    weakening the original seven-policy contract.
+    """
+
+    required = {
+        *KEYS,
+        "policy_id",
+        "policy_kind",
+        "policy_order",
+        "source_asof_date",
+        "contains_target_day_outcome",
+        "spot_ref_price",
+        "fut_ref_price",
+        "contract_size",
+        "upper_distance_bp",
+        "lower_distance_bp",
+        "nominal_band_bp",
+    }
+    _require(policies, required, "prepared policy rows")
+    if policies.is_empty():
+        raise ValueError("prepared policy rows must not be empty")
+    prepared = policies.with_columns(
+        pl.col("Date").cast(pl.String),
+        pl.col("ValueCode").cast(pl.String),
+        pl.col("QuoteCode").cast(pl.String),
+        pl.col("policy_id").cast(pl.String),
+        pl.col("policy_kind").cast(pl.String),
+        pl.col("policy_order").cast(pl.Int64),
+        pl.col("source_asof_date").cast(pl.String),
+        pl.col("contains_target_day_outcome").fill_null(True).cast(pl.Boolean),
+        pl.col("spot_ref_price").cast(pl.Float64),
+        pl.col("fut_ref_price").cast(pl.Float64),
+        pl.col("contract_size").cast(pl.Float64),
+        pl.col("upper_distance_bp").cast(pl.Float64),
+        pl.col("lower_distance_bp").cast(pl.Float64),
+        pl.col("nominal_band_bp").cast(pl.Float64),
+    )
+    _validate_d_safe(prepared, "prepared policy rows")
+    if prepared.filter(
+        ~pl.col("spot_ref_price").is_finite()
+        | (pl.col("spot_ref_price") <= 0.0)
+        | ~pl.col("fut_ref_price").is_finite()
+        | (pl.col("fut_ref_price") <= 0.0)
+        | ~pl.col("contract_size").is_finite()
+        | (pl.col("contract_size") <= 0.0)
+    ).height:
+        raise ValueError("policy reference prices and contract size must be positive")
+    _validate_policy_distances(prepared, allow_zero_lower=allow_zero_lower)
+    profile = cost_profile or TransactionCostProfile()
+    profile.validate()
+    scenarios = _normalise_adverse_scenarios(adverse_sensitivity_bp)
+    return _add_reference_geometry(
+        prepared,
+        profile,
+        scenarios,
+        allow_zero_lower=allow_zero_lower,
+    )
 
 
 def summarize_policy_geometry(frame: pl.DataFrame) -> pl.DataFrame:
@@ -317,9 +390,10 @@ def _normalise_boundaries(frame: pl.DataFrame) -> pl.DataFrame:
         | (pl.col("contract_size") <= 0)
     ).height:
         raise ValueError("boundary reference prices and contract size must be positive")
-    if "price_ladder_version" in result.columns and result.filter(
-        pl.col("price_ladder_version") != PRICE_LADDER_VERSION
-    ).height:
+    if (
+        "price_ladder_version" in result.columns
+        and result.filter(pl.col("price_ladder_version") != PRICE_LADDER_VERSION).height
+    ):
         raise ValueError("boundary price ladder version is stale")
     return result
 
@@ -396,9 +470,7 @@ def _melt_wide_boundaries(frame: pl.DataFrame) -> pl.DataFrame:
                 pl.col(upper).alias("upper_distance_bp"),
                 pl.col(lower).alias("lower_distance_bp"),
                 (
-                    pl.col(valid_column)
-                    if valid_column is not None
-                    else pl.lit(True)
+                    pl.col(valid_column) if valid_column is not None else pl.lit(True)
                 ).alias("adaptive_parameter_valid"),
                 (
                     pl.col(role_column)
@@ -418,6 +490,8 @@ def _add_reference_geometry(
     policies: pl.DataFrame,
     profile: TransactionCostProfile,
     scenarios: tuple[float, ...],
+    *,
+    allow_zero_lower: bool,
 ) -> pl.DataFrame:
     records: list[dict[str, object]] = []
     selected = policies.select(
@@ -438,9 +512,10 @@ def _add_reference_geometry(
             row["upper_distance_bp"],
             "upper_distance_bp",
         )
-        lower_distance = _positive(
-            row["lower_distance_bp"],
-            "lower_distance_bp",
+        lower_distance = (
+            _nonnegative(row["lower_distance_bp"], "lower_distance_bp")
+            if allow_zero_lower
+            else _positive(row["lower_distance_bp"], "lower_distance_bp")
         )
         nominal_band = _positive(row["nominal_band_bp"], "nominal_band_bp")
 
@@ -558,9 +633,7 @@ def _add_reference_geometry(
             # Keep the pre-rounding screen separate from the conservative
             # tick-rounded reference.  Outward rounding raises conditional
             # capture but can reduce touch/fill probability in S1.
-            "nominal_same_day_known_cost_margin_bp": (
-                nominal_band - same_day_cost_bp
-            ),
+            "nominal_same_day_known_cost_margin_bp": (nominal_band - same_day_cost_bp),
             "nominal_overnight_known_cost_margin_bp": (
                 nominal_band - overnight_cost_bp
             ),
@@ -623,8 +696,10 @@ def _validate_d_safe(frame: pl.DataFrame, label: str) -> None:
     if "execution_safe_snapshot" in frame.columns:
         unsafe = unsafe | (~pl.col("execution_safe_snapshot").fill_null(False))
     for column in source_columns:
-        unsafe = unsafe | pl.col(column).is_null() | (
-            pl.col(column).cast(pl.String) >= pl.col("Date").cast(pl.String)
+        unsafe = (
+            unsafe
+            | pl.col(column).is_null()
+            | (pl.col(column).cast(pl.String) >= pl.col("Date").cast(pl.String))
         )
     if frame.filter(unsafe).height:
         raise ValueError(f"{label} is not strictly pre-open safe")
@@ -643,18 +718,28 @@ def _validate_common_boundary_coverage(
     coverage = sample.group_by(list(KEYS)).agg(
         pl.col("boundary_quantile").n_unique().alias("quantiles"),
     )
-    if coverage.height != cohort.height or coverage.filter(
-        pl.col("quantiles") != len(QUANTILE_POLICIES)
-    ).height:
+    if (
+        coverage.height != cohort.height
+        or coverage.filter(pl.col("quantiles") != len(QUANTILE_POLICIES)).height
+    ):
         raise ValueError("every cohort key must have common q50/q80/q95 coverage")
 
 
-def _validate_policy_distances(frame: pl.DataFrame) -> None:
+def _validate_policy_distances(
+    frame: pl.DataFrame,
+    *,
+    allow_zero_lower: bool = False,
+) -> None:
+    invalid_lower = (
+        pl.col("lower_distance_bp") < 0.0
+        if allow_zero_lower
+        else pl.col("lower_distance_bp") <= 0.0
+    )
     if frame.filter(
         ~pl.col("upper_distance_bp").is_finite()
         | ~pl.col("lower_distance_bp").is_finite()
         | (pl.col("upper_distance_bp") <= 0)
-        | (pl.col("lower_distance_bp") <= 0)
+        | invalid_lower
         | (
             (
                 pl.col("nominal_band_bp")
@@ -664,7 +749,8 @@ def _validate_policy_distances(frame: pl.DataFrame) -> None:
             > GEOMETRY_EPS
         )
     ).height:
-        raise ValueError("policy distances must be positive and additive")
+        qualifier = "positive/nonnegative" if allow_zero_lower else "positive"
+        raise ValueError(f"policy distances must be {qualifier} and additive")
 
 
 def _validate_output_coverage(frame: pl.DataFrame, cohort_rows: int) -> None:
@@ -710,6 +796,18 @@ def _positive(value: object, name: str) -> float:
         raise ValueError(f"{name} must be finite and positive") from error
     if not math.isfinite(result) or result <= 0:
         raise ValueError(f"{name} must be finite and positive")
+    return result
+
+
+def _nonnegative(value: object, name: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be finite and nonnegative")
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite and nonnegative") from error
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"{name} must be finite and nonnegative")
     return result
 
 

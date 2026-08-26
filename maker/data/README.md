@@ -74,7 +74,7 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `pseudo_validation_stable_core_products.csv` | v6日期／市場別tick ladder下，兩 route 皆達 80% core 的68檔研究池；非 production |
 | `complete.json` | 八個 publication artifacts 的 hash／bytes與source lineage |
 
-## `walkforward/` 現況（2026-08-25）
+## `walkforward/` 現況（2026-08-26）
 
 固定 45 檔時代的 execution／exit maker／cross-session／post-cross／prequential／aggressive／compact 產物（約 42 GB 含 invalid 快照）已全部刪除；
 資料不可復原，需依 `doc/REWORK_PLAN_20260824.md` 在因果 manifest 上重跑。目前只保留：
@@ -87,6 +87,7 @@ Parquet、CSV、模型與大量報告預設不進 Git。每個資料集需保存
 | `makerfill_rank_l1_l5_sample_20260820_v5/`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1/` | 「只掛 A/B1–2」決策的五日證據 |
 | `august_attribution_s0_20260824_v2/` | S0 canonical q95 quote-only歸因；`cap=∞`、非20M策略回放 |
 | `august_attribution_s0_30_session_challenger_20260824_v1/` | S0 30-session market-only sensitivity；無scheduler／queue／makerFill且不進shortlist |
-| `foundation_revalidation_s05_20260825_v1/` | S0.5 canonical：71日 anchor、censor-aware q calibration／rank、q-independent broad cohort與七組known-cost geometry；非execution／EV |
+| `foundation_selection_s05_rebuild_20260826_v1/` | **S0.5 selection canonical**：15s盤中anchor、Q2 trail20 D-safe lookup、15,638筆S1 primary mother與C1-control／fixed geometry；其中 moving-anchor convergence只作 sensitivity，不作lower決策 |
+| `foundation_revalidation_s05_20260825_v1/` | S0.5 predecessor：EWMA120基礎重驗與重作依據；不得作現行S1 lookup |
 
 `august_attribution_s0_20260824_v1/` 有 explicit L1 clear scalar forward-fill 錯誤，已由 v2 supersede，不得引用。

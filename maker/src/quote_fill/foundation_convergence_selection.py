@@ -36,6 +36,7 @@ ANALYSIS_START_SECOND: Final = 300
 ENTRY_STOP_SECOND: Final = 14_400
 TRACKING_END_SECOND: Final = 15_600
 CHANGE_EPS_BP: Final = 1e-9
+CONVERGENCE_REFERENCE_SEMANTICS: Final = "frozen_anchor_at_upper_touch"
 
 TOD_BUCKETS: Final = (
     ("0905_1000", 300, 3_600),
@@ -107,7 +108,8 @@ def _normalise_day(
         )
         .sort([*GROUP_KEYS, "seconds_from_open", "timestamp"])
         .with_columns(
-            (pl.col("basis_mid_bp") - pl.col(anchor_column)).alias("_residual_bp")
+            (pl.col("basis_mid_bp") - pl.col(anchor_column)).alias("_residual_bp"),
+            pl.col(anchor_column).alias("_anchor_bp"),
         )
     )
     dates = result["Date"].unique().to_list()
@@ -218,7 +220,11 @@ def _normalise_boundaries(
 def _trace_post_touch(
     rows: list[dict[str, object]],
     touch_index: int,
+    *,
+    frozen_center_basis_bp: float,
 ) -> _PathTerminal:
+    if not math.isfinite(float(frozen_center_basis_bp)):
+        raise ValueError("frozen touch anchor must be finite")
     center_hit_second: int | None = None
     observed_floor = 0.0
     floor_frontier_distance: list[float] = []
@@ -242,9 +248,9 @@ def _trace_post_touch(
                 "session_cutoff",
             )
         adjacent = previous_second is None or second == previous_second + 1
-        residual = row["_residual_bp"]
-        valid = bool(row["analysis_eligible"]) and residual is not None
-        valid = valid and math.isfinite(float(residual))
+        basis_mid = row["basis_mid_bp"]
+        valid = bool(row["analysis_eligible"]) and basis_mid is not None
+        valid = valid and math.isfinite(float(basis_mid))
         if not adjacent or not valid:
             return _PathTerminal(
                 center_hit_second,
@@ -256,7 +262,10 @@ def _trace_post_touch(
                 True,
                 "eligibility_gap",
             )
-        value = float(residual)
+        # A2 freezes the exit reference when the upper is touched.  Future
+        # changes in the adaptive anchor cannot move the already submitted
+        # center/lower absolute basis prices and therefore cannot create a hit.
+        value = float(basis_mid) - float(frozen_center_basis_bp)
         if center_hit_second is None and value <= CHANGE_EPS_BP:
             center_hit_second = second
         if center_hit_second is not None:
@@ -443,8 +452,20 @@ def build_post_touch_convergence_facts(
                                     break
                             if touch_index is None:
                                 continue
-                            terminal = _trace_post_touch(path, touch_index)
                             touch_second = int(path[touch_index]["seconds_from_open"])
+                            touch_anchor = float(path[touch_index]["_anchor_bp"])
+                            touch_basis = float(path[touch_index]["basis_mid_bp"])
+                            if not math.isfinite(touch_anchor) or not math.isfinite(
+                                touch_basis
+                            ):
+                                raise ValueError(
+                                    "upper touch requires finite basis and anchor"
+                                )
+                            terminal = _trace_post_touch(
+                                path,
+                                touch_index,
+                                frozen_center_basis_bp=touch_anchor,
+                            )
                             touch_residual = float(path[touch_index]["_residual_bp"])
                             lower = float(lower_row["_boundary_distance_bp"])
                             lower_hit_second = (
@@ -483,6 +504,15 @@ def build_post_touch_convergence_facts(
                                     "touch_second": touch_second,
                                     "touch_timestamp": path[touch_index]["timestamp"],
                                     "touch_residual_bp": touch_residual,
+                                    "touch_basis_mid_bp": touch_basis,
+                                    "touch_anchor_basis_bp": touch_anchor,
+                                    "frozen_center_basis_bp": touch_anchor,
+                                    "frozen_independent_lower_basis_bp": (
+                                        touch_anchor - lower
+                                    ),
+                                    "convergence_reference_semantics": (
+                                        CONVERGENCE_REFERENCE_SEMANTICS
+                                    ),
                                     "center_hit": terminal.center_hit_second
                                     is not None,
                                     "center_hit_second": terminal.center_hit_second,
@@ -552,6 +582,11 @@ def build_post_touch_convergence_facts(
                 "touch_second": pl.Int64,
                 "touch_timestamp": pl.Datetime("ns"),
                 "touch_residual_bp": pl.Float64,
+                "touch_basis_mid_bp": pl.Float64,
+                "touch_anchor_basis_bp": pl.Float64,
+                "frozen_center_basis_bp": pl.Float64,
+                "frozen_independent_lower_basis_bp": pl.Float64,
+                "convergence_reference_semantics": pl.String,
                 "center_hit": pl.Boolean,
                 "center_hit_second": pl.Int64,
                 "time_to_center_seconds": pl.Int64,
@@ -582,4 +617,7 @@ def build_post_touch_convergence_facts(
     )
 
 
-__all__ = ["build_post_touch_convergence_facts"]
+__all__ = [
+    "CONVERGENCE_REFERENCE_SEMANTICS",
+    "build_post_touch_convergence_facts",
+]

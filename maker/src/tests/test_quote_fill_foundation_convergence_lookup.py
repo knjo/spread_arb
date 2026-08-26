@@ -64,8 +64,15 @@ def _fact(
         "boundary_quantile": quantile,
         "episode_sequence": sequence,
         "source_asof_date": source_asof,
+        "upper_distance_bp": 8.0,
         "independent_lower_distance_bp": 2.0,
         "touch_second": 1_000,
+        "touch_residual_bp": 8.0,
+        "touch_basis_mid_bp": 8.0,
+        "touch_anchor_basis_bp": 0.0,
+        "frozen_center_basis_bp": 0.0,
+        "frozen_independent_lower_basis_bp": -2.0,
+        "convergence_reference_semantics": "frozen_anchor_at_upper_touch",
         "center_hit": True,
         "center_hit_second": 1_005,
         "path_end_second": 1_030,
@@ -321,6 +328,10 @@ class ConvergenceScoringTests(unittest.TestCase):
         controls = self.controls
         self.assertTrue((controls["observable_started"] == 0).all())
         self.assertTrue((~controls["contains_target_day_outcome"]).all())
+        self.assertEqual(
+            controls["convergence_reference_semantics"].unique().to_list(),
+            ["frozen_anchor_at_upper_touch"],
+        )
         scored = score_convergence_predictions(self.facts, controls)
         self.assertTrue(scored.path_facts["contains_target_day_outcome"].all())
         self.assertTrue(scored.summary["contains_target_day_outcome"].all())
@@ -343,6 +354,28 @@ class ConvergenceScoringTests(unittest.TestCase):
             pl.col("convergence_candidate_id") == "C1_independent_lower_control"
         )["hit_status"].to_list()
         self.assertEqual(statuses, ["confirmed_hit", "unknown_censored"])
+        c0_path = scored.path_facts.filter(
+            pl.col("convergence_candidate_id") == "C0_center"
+        ).row(0, named=True)
+        self.assertAlmostEqual(c0_path["frozen_exit_basis_bp"], 0.0)
+        self.assertAlmostEqual(c0_path["touch_anchor_basis_bp"], 0.0)
+
+    def test_rejects_dynamic_anchor_fact_or_prediction_lineage(self) -> None:
+        dynamic_facts = self.facts.with_columns(
+            pl.lit("dynamic_anchor_sensitivity").alias(
+                "convergence_reference_semantics"
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "path invariants"):
+            score_convergence_predictions(dynamic_facts, self.controls)
+
+        dynamic_predictions = self.controls.with_columns(
+            pl.lit("dynamic_anchor_sensitivity").alias(
+                "convergence_reference_semantics"
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "inconsistent support"):
+            score_convergence_predictions(self.facts, dynamic_predictions)
 
     def test_boundary_controls_include_no_touch_target_lineages(self) -> None:
         boundary_rows: list[dict[str, object]] = []

@@ -80,11 +80,12 @@ from .foundation_selection_stats import (
     temporal_product_spearman,
 )
 
-RUNNER_VERSION: Final = "foundation_selection_s05_rebuild_runner_v1"
+RUNNER_VERSION: Final = "foundation_selection_s05_rebuild_runner_v2"
+LEGACY_RUNNER_VERSION_V1: Final = "foundation_selection_s05_rebuild_runner_v1"
 CHECKPOINT_SCHEMA_VERSION: Final = "foundation_selection_atomic_checkpoint_v1"
-EXPECTED_REGISTRY_VERSION: Final = "foundation_selection_s05_rebuild_registry_v1"
+EXPECTED_REGISTRY_VERSION: Final = "foundation_selection_s05_rebuild_registry_v2"
 EXPECTED_REGISTRY_SHA256: Final = (
-    "00b0147db5054b126046ef2d59b2ca2a43ad26e78d695a88fed13ffd8f151ec1"
+    "bd6ddda5fde082e5cb66638b87785ce81215c6b322ba80b1cef1729ef73f0958"
 )
 EXPECTED_SESSION_LIST_SHA256: Final = (
     "4781a479f4c04b6d53fe206035a89c1bb7a83ecc8d2796266aac6467bb7bc6cd"
@@ -161,6 +162,9 @@ DEFAULT_REGISTRY_PATH: Final = Path(__file__).with_name(
     "foundation_selection_registry.json"
 )
 DEFAULT_OUTPUT_ROOT: Final = (
+    MAKER_ROOT / "data" / "walkforward" / "foundation_selection_s05_rebuild_20260826_v2"
+)
+LEGACY_OUTPUT_ROOT_V1: Final = (
     MAKER_ROOT / "data" / "walkforward" / "foundation_selection_s05_rebuild_20260826_v1"
 )
 
@@ -214,6 +218,11 @@ CONVERGENCE_FACT_SCHEMA: Final = pl.Schema(
         "touch_second": pl.Int64,
         "touch_timestamp": pl.Datetime("ns"),
         "touch_residual_bp": pl.Float64,
+        "touch_basis_mid_bp": pl.Float64,
+        "touch_anchor_basis_bp": pl.Float64,
+        "frozen_center_basis_bp": pl.Float64,
+        "frozen_independent_lower_basis_bp": pl.Float64,
+        "convergence_reference_semantics": pl.String,
         "center_hit": pl.Boolean,
         "center_hit_second": pl.Int64,
         "time_to_center_seconds": pl.Int64,
@@ -302,6 +311,7 @@ def _validate_registry_constants(payload: Mapping[str, object]) -> None:
 
     expected_scalars: tuple[tuple[tuple[str, ...], object], ...] = (
         (("registry_version",), EXPECTED_REGISTRY_VERSION),
+        (("frozen_on",), "2026-08-26"),
         (("development_only",), True),
         (("source_start",), SOURCE_START_DATE),
         (("source_end",), SOURCE_END_DATE),
@@ -318,6 +328,22 @@ def _validate_registry_constants(payload: Mapping[str, object]) -> None:
             20,
         ),
         (("convergence", "tracking_end_second"), 15_600),
+        (
+            ("convergence", "reference_semantics"),
+            "frozen_anchor_at_upper_touch",
+        ),
+        (
+            ("convergence", "frozen_center_formula"),
+            "selected_anchor_bp_at_upper_touch",
+        ),
+        (
+            ("convergence", "frozen_lower_formula"),
+            "frozen_center_basis_bp_minus_threshold_distance_bp",
+        ),
+        (
+            ("convergence", "dynamic_anchor_results_role"),
+            "noncanonical_sensitivity_only",
+        ),
     )
     mismatches = []
     for keys, expected in expected_scalars:
@@ -600,15 +626,17 @@ def checkpoint_fingerprint(
     source_commit: str,
     input_records: Sequence[Mapping[str, object]],
     parameters: Mapping[str, object],
+    runner_version: str = RUNNER_VERSION,
+    session_list_sha256: str = EXPECTED_SESSION_LIST_SHA256,
 ) -> str:
     """Return the canonical fingerprint for one phase/Date computation."""
 
     payload = {
-        "runner_version": RUNNER_VERSION,
+        "runner_version": str(runner_version),
         "phase": str(phase),
         "date": str(date),
         "registry_sha256": str(registry_sha256),
-        "session_list_sha256": EXPECTED_SESSION_LIST_SHA256,
+        "session_list_sha256": str(session_list_sha256),
         "source_commit": str(source_commit),
         "input_records": _normalise_records(input_records),
         "parameters": dict(parameters),
@@ -625,6 +653,9 @@ def _checkpoint_marker_payload(
     input_records: Sequence[Mapping[str, object]],
     parameters: Mapping[str, object],
     artifacts: Mapping[str, Mapping[str, object]],
+    runner_version: str = RUNNER_VERSION,
+    checkpoint_schema_version: str = CHECKPOINT_SCHEMA_VERSION,
+    session_list_sha256: str = EXPECTED_SESSION_LIST_SHA256,
 ) -> dict[str, object]:
     fingerprint = checkpoint_fingerprint(
         phase=phase,
@@ -633,14 +664,16 @@ def _checkpoint_marker_payload(
         source_commit=source_commit,
         input_records=input_records,
         parameters=parameters,
+        runner_version=runner_version,
+        session_list_sha256=session_list_sha256,
     )
     payload: dict[str, object] = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "runner_version": RUNNER_VERSION,
+        "schema_version": str(checkpoint_schema_version),
+        "runner_version": str(runner_version),
         "phase": phase,
         "date": date,
         "registry_sha256": registry_sha256,
-        "session_list_sha256": EXPECTED_SESSION_LIST_SHA256,
+        "session_list_sha256": str(session_list_sha256),
         "source_commit": source_commit,
         "input_records": _normalise_records(input_records),
         "parameters": dict(parameters),
@@ -657,6 +690,9 @@ def verify_date_checkpoint(
     *,
     expected_fingerprint: str | None = None,
     verify_inputs: bool = False,
+    expected_runner_version: str = RUNNER_VERSION,
+    expected_schema_version: str = CHECKPOINT_SCHEMA_VERSION,
+    expected_session_list_sha256: str = EXPECTED_SESSION_LIST_SHA256,
 ) -> Mapping[str, object]:
     """Verify marker self-hash, artifact hashes, and optional input lineage."""
 
@@ -670,10 +706,12 @@ def verify_date_checkpoint(
     marker_digest = payload.pop("marker_payload_sha256", None)
     if marker_digest != _canonical_sha256(payload):
         raise ValueError(f"checkpoint marker self-hash mismatch: {marker_path}")
-    if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+    if payload.get("schema_version") != expected_schema_version:
         raise ValueError(f"unsupported checkpoint schema: {marker_path}")
-    if payload.get("runner_version") != RUNNER_VERSION:
+    if payload.get("runner_version") != expected_runner_version:
         raise ValueError(f"checkpoint runner version drift: {marker_path}")
+    if payload.get("session_list_sha256") != expected_session_list_sha256:
+        raise ValueError(f"checkpoint session-list drift: {marker_path}")
     if payload.get("complete") is not True:
         raise ValueError(f"checkpoint is not complete: {marker_path}")
     fingerprint = checkpoint_fingerprint(
@@ -683,6 +721,8 @@ def verify_date_checkpoint(
         source_commit=str(payload["source_commit"]),
         input_records=list(payload["input_records"]),
         parameters=dict(payload["parameters"]),
+        runner_version=expected_runner_version,
+        session_list_sha256=expected_session_list_sha256,
     )
     if payload.get("checkpoint_fingerprint") != fingerprint:
         raise ValueError(f"checkpoint fingerprint self-mismatch: {marker_path}")
@@ -712,6 +752,24 @@ def verify_date_checkpoint(
     return payload
 
 
+def verify_legacy_v1_date_checkpoint(
+    partition: Path,
+    *,
+    expected_fingerprint: str | None = None,
+    verify_inputs: bool = False,
+) -> Mapping[str, object]:
+    """Verify only the byte-explicit ace2669/v1 checkpoint contract."""
+
+    return verify_date_checkpoint(
+        partition,
+        expected_fingerprint=expected_fingerprint,
+        verify_inputs=verify_inputs,
+        expected_runner_version=LEGACY_RUNNER_VERSION_V1,
+        expected_schema_version="foundation_selection_atomic_checkpoint_v1",
+        expected_session_list_sha256=EXPECTED_SESSION_LIST_SHA256,
+    )
+
+
 def _write_checkpoint_artifact(path: Path, value: object) -> None:
     if isinstance(value, pl.DataFrame):
         _write_frame(value, path)
@@ -731,6 +789,9 @@ def atomic_publish_checkpoint(
     input_records: Sequence[Mapping[str, object]],
     parameters: Mapping[str, object],
     artifact_values: Mapping[str, object],
+    runner_version: str = RUNNER_VERSION,
+    checkpoint_schema_version: str = CHECKPOINT_SCHEMA_VERSION,
+    session_list_sha256: str = EXPECTED_SESSION_LIST_SHA256,
 ) -> Mapping[str, object]:
     """Publish a complete checkpoint directory with one atomic rename."""
 
@@ -766,14 +827,26 @@ def atomic_publish_checkpoint(
             input_records=input_records,
             parameters=parameters,
             artifacts=artifacts,
+            runner_version=runner_version,
+            checkpoint_schema_version=checkpoint_schema_version,
+            session_list_sha256=session_list_sha256,
         )
         _write_json(temporary / "complete.json", marker)
         expected = str(marker["checkpoint_fingerprint"])
-        verify_date_checkpoint(temporary, expected_fingerprint=expected)
+        verify_date_checkpoint(
+            temporary,
+            expected_fingerprint=expected,
+            expected_runner_version=runner_version,
+            expected_schema_version=checkpoint_schema_version,
+            expected_session_list_sha256=session_list_sha256,
+        )
         os.replace(temporary, destination)
         return verify_date_checkpoint(
             destination,
             expected_fingerprint=expected,
+            expected_runner_version=runner_version,
+            expected_schema_version=checkpoint_schema_version,
+            expected_session_list_sha256=session_list_sha256,
         )
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -3315,7 +3388,12 @@ def _convergence_fact_parameters(
             SELECTED_BOUNDARY_ROWS_PER_PRODUCT_DAY
         ),
         "touch_definition": "first_causal_selected_upper_touch",
-        "path_contract": "center_then_immediately_following_negative_cycle",
+        "convergence_reference_semantics": "frozen_anchor_at_upper_touch",
+        "frozen_center_formula": "selected_anchor_bp_at_upper_touch",
+        "frozen_lower_formula": "frozen_center_basis_bp-threshold_distance_bp",
+        "path_contract": (
+            "frozen_center_then_immediately_following_frozen_negative_cycle"
+        ),
         "right_censor_reasons": ["eligibility_gap", "session_cutoff"],
     }
 
@@ -3866,6 +3944,8 @@ def _convergence_prediction_parameters(
         "prediction_history_slice": "strict_prior_maximum60_sessions",
         "conditional_candidates": list(CONVERGENCE_BASE_CANDIDATES),
         "controls": list(CONVERGENCE_CONTROL_CANDIDATES),
+        "convergence_reference_semantics": "frozen_anchor_at_upper_touch",
+        "dynamic_anchor_results_role": "noncanonical_sensitivity_only",
         "control_prediction_source": "selected_D_safe_boundary_cells_not_touch_facts",
         "support_denominator": "all_selected_boundary_target_lineage_cells",
         "entry_q_sensitivity_support": (
@@ -4684,6 +4764,10 @@ def publish_final_bundle(
                 "selected_entry_q_candidate_id": q_ids[0],
                 "diagnostic_entry_q_candidate_id": q_ids[1],
                 "convergence_unique_winner_declared": False,
+                "convergence_reference_semantics": (
+                    "frozen_anchor_at_upper_touch"
+                ),
+                "dynamic_anchor_results_role": "noncanonical_sensitivity_only",
                 "deployment_baseline_approved": False,
                 "development_only": True,
                 "diagnostic_scope": "all_131_sessions",

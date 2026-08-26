@@ -26,6 +26,7 @@ from .foundation_boundary_selection import (
     clip_completed_quantile_to_interval,
     date_equal_completed_quantile,
 )
+from .foundation_convergence_selection import CONVERGENCE_REFERENCE_SEMANTICS
 
 CHANGE_EPS_BP: Final = 1e-9
 ENTRY_STOP_SECOND: Final = 14_400
@@ -110,6 +111,7 @@ CONVERGENCE_PREDICTION_SCHEMA: Final = pl.Schema(
         "tod_bucket": pl.String,
         "boundary_quantile": pl.Int64,
         "convergence_candidate_id": pl.String,
+        "convergence_reference_semantics": pl.String,
         "lookup_id": pl.String,
         "lookback_sessions": pl.Int64,
         "minimum_completed_dates": pl.Int64,
@@ -154,10 +156,14 @@ CONVERGENCE_PATH_SCORE_SCHEMA: Final = pl.Schema(
         "boundary_quantile": pl.Int64,
         "episode_sequence": pl.Int64,
         "convergence_candidate_id": pl.String,
+        "convergence_reference_semantics": pl.String,
         "effective_lookup_id": pl.String,
         "effective_source_asof_date": pl.String,
         "threshold_distance_bp": pl.Float64,
+        "frozen_exit_basis_bp": pl.Float64,
         "touch_second": pl.Int64,
+        "touch_anchor_basis_bp": pl.Float64,
+        "frozen_center_basis_bp": pl.Float64,
         "center_hit_second": pl.Int64,
         "path_end_second": pl.Int64,
         "observed_post_touch_floor_bp": pl.Float64,
@@ -246,8 +252,15 @@ def _normalise_facts(facts: pl.DataFrame, source: str) -> pl.DataFrame:
     required = {
         *PATH_FACT_KEYS,
         "source_asof_date",
+        "upper_distance_bp",
         "independent_lower_distance_bp",
         "touch_second",
+        "touch_residual_bp",
+        "touch_basis_mid_bp",
+        "touch_anchor_basis_bp",
+        "frozen_center_basis_bp",
+        "frozen_independent_lower_basis_bp",
+        "convergence_reference_semantics",
         "center_hit",
         "center_hit_second",
         "path_end_second",
@@ -269,8 +282,15 @@ def _normalise_facts(facts: pl.DataFrame, source: str) -> pl.DataFrame:
         pl.col("boundary_quantile").cast(pl.Int64),
         pl.col("episode_sequence").cast(pl.Int64),
         pl.col("source_asof_date").cast(pl.String),
+        pl.col("upper_distance_bp").cast(pl.Float64),
         pl.col("independent_lower_distance_bp").cast(pl.Float64),
         pl.col("touch_second").cast(pl.Int64),
+        pl.col("touch_residual_bp").cast(pl.Float64),
+        pl.col("touch_basis_mid_bp").cast(pl.Float64),
+        pl.col("touch_anchor_basis_bp").cast(pl.Float64),
+        pl.col("frozen_center_basis_bp").cast(pl.Float64),
+        pl.col("frozen_independent_lower_basis_bp").cast(pl.Float64),
+        pl.col("convergence_reference_semantics").cast(pl.String),
         pl.col("center_hit").fill_null(False).cast(pl.Boolean),
         pl.col("center_hit_second").cast(pl.Int64),
         pl.col("path_end_second").cast(pl.Int64),
@@ -288,9 +308,43 @@ def _normalise_facts(facts: pl.DataFrame, source: str) -> pl.DataFrame:
         pl.any_horizontal(
             ~pl.col("boundary_quantile").is_in(PRIMARY_QUANTILES),
             pl.col("episode_sequence") <= 0,
+            pl.col("upper_distance_bp").is_null(),
+            ~pl.col("upper_distance_bp").is_finite(),
+            pl.col("upper_distance_bp") <= 0.0,
             pl.col("independent_lower_distance_bp").is_null(),
             ~pl.col("independent_lower_distance_bp").is_finite(),
             pl.col("independent_lower_distance_bp") <= 0.0,
+            pl.col("touch_basis_mid_bp").is_null(),
+            ~pl.col("touch_basis_mid_bp").is_finite(),
+            pl.col("touch_residual_bp").is_null(),
+            ~pl.col("touch_residual_bp").is_finite(),
+            pl.col("touch_anchor_basis_bp").is_null(),
+            ~pl.col("touch_anchor_basis_bp").is_finite(),
+            pl.col("frozen_center_basis_bp").is_null(),
+            ~pl.col("frozen_center_basis_bp").is_finite(),
+            pl.col("frozen_independent_lower_basis_bp").is_null(),
+            ~pl.col("frozen_independent_lower_basis_bp").is_finite(),
+            pl.col("convergence_reference_semantics")
+            != CONVERGENCE_REFERENCE_SEMANTICS,
+            (
+                pl.col("touch_anchor_basis_bp")
+                - pl.col("frozen_center_basis_bp")
+            ).abs()
+            > CHANGE_EPS_BP,
+            (
+                pl.col("touch_basis_mid_bp")
+                - pl.col("touch_anchor_basis_bp")
+                - pl.col("touch_residual_bp")
+            ).abs()
+            > CHANGE_EPS_BP,
+            pl.col("touch_residual_bp") + CHANGE_EPS_BP
+            < pl.col("upper_distance_bp"),
+            (
+                pl.col("frozen_center_basis_bp")
+                - pl.col("independent_lower_distance_bp")
+                - pl.col("frozen_independent_lower_basis_bp")
+            ).abs()
+            > CHANGE_EPS_BP,
             pl.col("observed_post_touch_floor_bp").is_null(),
             ~pl.col("observed_post_touch_floor_bp").is_finite(),
             pl.col("observed_post_touch_floor_bp") < 0.0,
@@ -642,6 +696,9 @@ def _registered_records_from_cells(
                 {
                     **{column: target_row[column] for column in TARGET_LINEAGE_KEYS},
                     "convergence_candidate_id": candidate_id,
+                    "convergence_reference_semantics": (
+                        CONVERGENCE_REFERENCE_SEMANTICS
+                    ),
                     "lookup_id": spec.lookup_id,
                     "lookback_sessions": spec.lookback_sessions,
                     "minimum_completed_dates": spec.minimum_completed_dates,
@@ -816,6 +873,9 @@ def build_conditional_convergence_predictions(
                 {
                     **{column: target_row[column] for column in TARGET_LINEAGE_KEYS},
                     "convergence_candidate_id": candidate_id,
+                    "convergence_reference_semantics": (
+                        CONVERGENCE_REFERENCE_SEMANTICS
+                    ),
                     "lookup_id": spec.lookup_id,
                     "lookback_sessions": spec.lookback_sessions,
                     "minimum_completed_dates": spec.minimum_completed_dates,
@@ -891,6 +951,7 @@ def validate_convergence_prediction_lineage(predictions: pl.DataFrame) -> None:
     required = {
         *THRESHOLD_KEYS,
         "lookup_id",
+        "convergence_reference_semantics",
         "source_asof_date",
         "native_threshold_distance_bp",
         "native_supported",
@@ -903,6 +964,10 @@ def validate_convergence_prediction_lineage(predictions: pl.DataFrame) -> None:
     _require(predictions, required, "convergence predictions")
     invalid = predictions.filter(
         pl.col("contains_target_day_outcome").fill_null(True)
+        | (
+            pl.col("convergence_reference_semantics").fill_null("")
+            != CONVERGENCE_REFERENCE_SEMANTICS
+        )
         | (
             pl.col("native_supported").fill_null(False)
             & (
@@ -1053,6 +1118,9 @@ def _build_outcome_conditioned_control_convergence_predictions(
                 {
                     **base,
                     "convergence_candidate_id": candidate_id,
+                    "convergence_reference_semantics": (
+                        CONVERGENCE_REFERENCE_SEMANTICS
+                    ),
                     "lookup_id": lookup_id,
                     "lookback_sessions": 0,
                     "minimum_completed_dates": 0,
@@ -1219,6 +1287,9 @@ def build_control_convergence_predictions_from_boundaries(
                 {
                     **base,
                     "convergence_candidate_id": candidate_id,
+                    "convergence_reference_semantics": (
+                        CONVERGENCE_REFERENCE_SEMANTICS
+                    ),
                     "lookup_id": lookup_id,
                     "lookback_sessions": 0,
                     "minimum_completed_dates": 0,
@@ -1350,10 +1421,18 @@ def score_convergence_predictions(
             {
                 **{column: row[column] for column in PATH_FACT_KEYS},
                 "convergence_candidate_id": row["convergence_candidate_id"],
+                "convergence_reference_semantics": (
+                    CONVERGENCE_REFERENCE_SEMANTICS
+                ),
                 "effective_lookup_id": row["effective_lookup_id"],
                 "effective_source_asof_date": row["effective_source_asof_date"],
                 "threshold_distance_bp": threshold,
+                "frozen_exit_basis_bp": (
+                    float(row["frozen_center_basis_bp"]) - threshold
+                ),
                 "touch_second": row["touch_second"],
+                "touch_anchor_basis_bp": row["touch_anchor_basis_bp"],
+                "frozen_center_basis_bp": row["frozen_center_basis_bp"],
                 "center_hit_second": center_second,
                 "path_end_second": row["path_end_second"],
                 "observed_post_touch_floor_bp": row["observed_post_touch_floor_bp"],
@@ -1467,6 +1546,7 @@ __all__ = [
     "CONDITIONAL_CANDIDATES",
     "CONVERGENCE_PATH_SCORE_SCHEMA",
     "CONVERGENCE_PREDICTION_SCHEMA",
+    "CONVERGENCE_REFERENCE_SEMANTICS",
     "HISTORY_LINEAGE_KEYS",
     "PATH_FACT_KEYS",
     "REGISTERED_LOOKUPS",

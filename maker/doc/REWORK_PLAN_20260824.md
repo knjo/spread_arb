@@ -4,7 +4,7 @@
 
 決策基線：nested repo commit `0c3e5ad`
 
-狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0、S0.5 已完成。S1 暫不開跑，先確認 S0.5 handoff 並重建 selected-anchor lookup**。完成一項就在本文件打勾並填結果與 bundle 連結。
+狀態：**A1–D10 與 C9／B5／B6 口徑已定案；S0、S0.5 anchor／entry-q／S1 mother 已完成。舊 convergence 使用 moving anchor，已隔離為 sensitivity；frozen-at-upper-touch v2 正在正式重算，完成前不凍結 lower 或開始 S1**。完成一項就在本文件打勾並填結果與 bundle 連結。
 
 ## 研究定位（使用者定義）
 
@@ -82,9 +82,9 @@
 ### Development 資料與因果邊界
 
 - S0 歷史歸因固定使用 `monthly_product_selector_causal_v2_20260822/daily_entry_manifest.csv`，SHA-256 `9f1bcddf17eff968ee51e0decdb04736a3747f0665886ce3e4fd26031cfb5891`；原 manifest 是 2026-05-04～2026-08-13 共 72 sessions、3,886 product-days，terminal／cashflow 追至 2026-08-21 共 78 reporting sessions。它是用 q95／Spot-Bid proxy 選出的 conditional matched sample，只保留成 bridge／sensitivity；其中落在 S0.5 的 71 個 full-60 sessions 且進入 broad cohort者是 3,846 product-days，兩個數字不可混用。
-- S0.5 incumbent primary 是 2026-05-05～2026-08-13 共 71 個 full-60 sessions。現有 EWMA120 q-independent Spot-Bid broad reference 為 15,935 product-days、244 商品；selected anchor 若改為 EWMA30，須重建 excursion、rolling boundary 與 q-independent cohort，重新發布精確筆數後才凍結 S1 universe。
-- S1／S2 不得依 policy／route outcome 各自重選。建議共同母體使用 selected-anchor 的 q-independent D-safe broad cohort；舊 q95 matched manifest 只列 sensitivity。此項等使用者確認 S0.5 handoff 後定案。
-- Rolling-60 baseline 固定 `lookback_sessions=60`、正負側分開、嚴格 `<D`。S0.5 證明排序力強但 5→8 月 absolute reach 漂移；若加 level recalibration／短窗 challenger，其公式與 history minima 必須在 S1 outcome 前另行凍結，不能事後 fine-tune。
+- S0.5 primary development panel 是 2026-05-05～2026-08-13 共 71 sessions；2026-01-26～2026-08-13 的 131 sessions只供嚴格 `<D` history，2026-08-14 起 protected forward 未讀取。盤中 anchor 已凍結為 `time_ewma_15s`，D-safe entry q 已凍結為 `Q2_trail20_date_equal`；winner 身分使用 71 日 development outcomes，故明標 development-selected，不冒充 untouched forward。
+- S1／S2 不得依 policy／route outcome 各自重選。共同母體固定為 `foundation_selection_s05_rebuild_20260826_v1/s1_mother.parquet` 中 `s1_primary=true` 的 15,638 product-days、71 sessions、244 商品；七組共用。舊 q95 matched manifest 只列 bridge／sensitivity。
+- Entry q baseline 固定為 `Q2_trail20_date_equal`：正負側分開、最多最近 20 sessions、至少 15 日、嚴格 `<D`。`Q2_trail20_date_equal__tod10` 只作 diagnostic；rolling-60、5／10 日 level scale、prior-expiry／DTE 都已在同一 common support 比較，不再於 S1 outcome 後 fine-tune。
 - S5 的 September 不重用舊 q95 manifest；它使用最終凍結的 selected-anchor、cohort／selector config，再逐日套 `<D` boundary／liquidity。
 
 ### 共用 order、position 與 accounting 狀態
@@ -138,7 +138,8 @@
 ## 工作順序與固定 handoff
 
 ```text
-S0 8 月歸因 → S0.5 查表基礎重驗 → selected-anchor lookup 重建／凍結
+S0 8 月歸因 → S0.5 anchor／selected lookup／S1 mother（已完成）
+                       → frozen-at-touch convergence／geometry（重算中）
                                       ↓
               S1 七組 Spot Bid → S2 Future Ask → S3 exit maker
                                                      ↓
@@ -146,7 +147,7 @@ S0 8 月歸因 → S0.5 查表基礎重驗 → selected-anchor lookup 重建／�
 ```
 
 1. S0 只診斷，不看結果改七組 primary grid；30-session 只能另列 sensitivity。
-2. S0.5 先驗 anchor、boundary 校準／排序、q-independent cohort 與已知成本幾何。它不選 execution champion；selected anchor／level challenger／cohort 先凍結並重建 lookup，才進 S1。
+2. S0.5 已選 `time_ewma_15s`、`Q2_trail20_date_equal` 並發布 common S1 mother；normal-exit lower 必須以 upper touch／submit 當下凍結的絕對價重算。它不選 execution champion，也不發布 PnL。
 3. S1 跑 7 組，依共同規則留最多 2 組 finalist。
 4. S2 只跑這 2 組；兩 route backend／sampling 不 pooling，完成後重選最多 2 個 entry finalist。
 5. S3 對 entry finalists 先跑第一條 exit route。「跑通」只指 partitions、schema、ledger invariants、verifier 與 tests 通過，與 PnL 無關；工程完成即加第二條 route，再留最多 2 個 entry×exit finalist。
@@ -167,27 +168,31 @@ S0 8 月歸因 → S0.5 查表基礎重驗 → selected-anchor lookup 重建／�
 
 完成結果（2026-08-24）：[`AUGUST_ATTRIBUTION_20260824.md`](quote_fill/AUGUST_ATTRIBUTION_20260824.md)。May～Jul pooled → August 的 excursion touch rate為 7.1497% → 4.2923%，post-touch approximate fill為1.8796% → 1.2183%，故分類為兩者並列；30-session market-only sensitivity將August hypothetical touch提高至4.5043%，仍未消除落差，不進S1 shortlist。Canonical bundle為`maker/data/walkforward/august_attribution_s0_20260824_v2`，`complete.json` SHA-256 `5bb3addbd674fc85162630a9f2a7033b1d52bec253dfbb698deabb19cdb3f28b`；30-session bundle為`august_attribution_s0_30_session_challenger_20260824_v1`，marker SHA-256 `680d68bf6cccb9f459b19ed199e82bb7b5c6f0a7bbffb3c468e42ad30e2b15ed`。舊`august_attribution_s0_20260824_v1`有explicit L1 clear forward-fill錯誤，已由v2取代且不得引用。
 
-### S0.5　查表基礎重驗
+### S0.5　查表基礎完整重作
 
-- [x] 用 2026-05-05～2026-08-13 共 71 個 full-60 sessions 比較 causal anchor；future center 逐 freshness gate 重算，whole-Date bootstrap，不把秒級資料當 iid。
-- [x] 新增 left／right censor-aware excursion overlay，保留 hit、known miss、unknown 與 no-observable product-day；驗證新 overlay 的非 left-censored部分與既有 daily facts 完全等價。
-- [x] 以 product-day equal 為 primary，重驗 q50／q80／q95 絕對 reach、月度 drift 與逐日商品間 Spearman；event-pooled 只作 audit。
-- [x] 建立未使用 target outcome 的 q-independent cohort funnel；舊 q95 monthly selector只作 bridge。
-- [x] 對七組 policy 共用同一 Spot-Bid broad cohort，計完整 `upper+lower`、合法 tick、逐腿同日／隔日費稅與 10／20／30 bp adverse sensitivity；固定 `actionable_execution=false`、`ev_ready=false`。
-- [x] 發布 clean-commit、full-input-hash、marker-last canonical bundle，排除 2026-08-14 起 locked forward；282 tests／48 subtests、Ruff、`py_compile`、`--verify-inputs` 通過。
+- [x] 在 execution outcome 前凍結 registry：wall-clock 15／30／60／120 秒 EWMA、60／120 秒 median；boundary 比 20／60 sessions、5／10 日 level scale、prior-expiry／DTE 與 TOD scale。
+- [x] 以 30～300 秒 future median、product-day／month equal 與 5-session paired whole-Date block bootstrap 選出 `time_ewma_15s`；30s 留 rank-2 diagnostic，長 horizon 另列 sensitivity。
+- [x] 以 15s residual 從頭重建 131 日 censor-aware episodes，不沿用 EWMA120 distance；每日 prediction嚴格 `source_asof_date < Date`。
+- [x] 在同一 common support 選出 `Q2_trail20_date_equal`；TOD10 rank-2 只作 diagnostic，60-session／level5／level10／prior-expiry 都未勝出。
+- [ ] 以 `frozen_anchor_at_upper_touch` proxy 重建 conditional convergence：C0 center、C1 wide control、C2 reach80、C3 reach50；20／60 日與 resolved fallback都保存。舊逐秒 moving-anchor結果只作 sensitivity，不進lower決策。
+- [x] 建立 q-independent cohort；`s1_mother.parquet` 保存 17,006 mapping rows，`s1_primary=true` 為 15,638 product-days、71 日、244 商品，每筆完整 4 TOD×3q×2side。
+- [x] 對七組 policy 共用 S1 mother 計 marginal two-sided control geometry；逐列確認 q-policy lower 等於 C1 independent negative-q control，不能冒充正常 conditional exit。
+- [ ] 以 frozen-at-touch v2 發布 C0／C2／C3 resolved supported geometry與缺值 audit；全部固定 `actionable_execution=false`、`ev_ready=false`。
+- [x] 以 clean source commit 發布 51-artifact atomic checkpoint bundle；獨立 `verify-only` 通過，2026-08-14 起 protected forward 未讀取。
 
-完成結果（2026-08-25）：[`FOUNDATION_REVALIDATION_S05_20260825.md`](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md)。EWMA30 的 future-center MAE 8.877 bp，優於 EWMA120 的 9.750 bp，建議升為 development primary，但須先用其 residual 重建 q table。Rolling-60 lookup 在六個 q×side 的逐日 Spearman 全為正、平均 0.615～0.673，證明有排序力；q95 LB 卻由 5 月約 8.4% 降至 8 月約 4.0%，證明 absolute level 有 regime lag。EWMA120 incumbent broad reference 為 15,935 product-days；舊 selector只重疊 3,846。Nominal q80／q95 同日已知成本後 margin 中位數為 11.632／38.102 bp，但沒有 execution／EV。Canonical bundle 為`maker/data/walkforward/foundation_revalidation_s05_20260825_v1`，`complete.json` SHA-256 `dd89f42c4c10ef38d4b32fce492749c3646416121e5f64286034ba22b73b149b`。
+階段結果（2026-08-26）：[`FOUNDATION_SELECTION_S05_REBUILD_20260826.md`](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md)。短期盤中中心選 `time_ewma_15s`（30～300 秒 month-equal MAE 8.722 bp）；entry q 選 `Q2_trail20_date_equal`（cross-product Spearman 0.626、same-product temporal Spearman 0.142，屬弱 temporal signal）。Canonical selection bundle 為 `maker/data/walkforward/foundation_selection_s05_rebuild_20260826_v1`，`complete.json` SHA-256 `de7f6d1dddcdbe18875acfb4965d165cc9af6387ec8b02d1e8d55c5766531d60`。其中 moving-anchor convergence不得用於 lower；frozen-at-touch v2 supplement完成後才補正式 reach／coverage／geometry。2026-08-25 舊報告與 bundle保留為 predecessor，不再作S1 handoff。
 
 S1 前 handoff：
 
-- [ ] 確認 anchor 正式目標；建議 EWMA30 development primary、EWMA120 incumbent control、prior-seeded不升格。
-- [ ] 凍結 rolling-60 baseline 以外唯一一個完全 `<D` 的 level recalibration／短窗 challenger。
-- [ ] 確認 S1 primary 使用 selected-anchor 重建後的 q-independent broad cohort；舊 q95 matched sample只作 sensitivity。
+- [x] Anchor／entry q／共同 cohort 已凍結：15s／Q2 trail20／15,638 product-days。
+- [ ] Frozen v2完成後比較 C0／C2／C3，凍結唯一 primary lower scheme；C0是合法 maker＋taker center exit，C1只是未作conditional calibration的wide control，不能默認作fallback。
+- [ ] 依 frozen v2 的實際coverage凍結 unsupported行為：`skip cell`保留共同mother分母並作no-trade，或明訂C2→C0 composite／其他hierarchical fallback；不得刪樣或把composite整體標為reach80。
+- [ ] Known-cost positive 不作 q-independent mother gate；建議七組全跑，只把**選定 conditional lower 後**的 causal positive-margin flag列為預註冊 subgroup，等待使用者確認。
 - [x] Expiry paired residual 採使用者指定的 spot-close／spot-close、basis=0 accounting convention；非 executable、非 same-day completion。
 
 ### S1　七組 policy × Spot Bid maker route
 
-- [ ] 先完成上述 S0.5 handoff 與 selected-anchor excursion／rolling-boundary／broad-cohort canonical rebuild；不得把 EWMA120 distance 直接套到 EWMA30。
+- [ ] S0.5 selected-anchor excursion／entry-q／broad-cohort canonical rebuild 已完成；待 frozen-at-touch convergence supplement正式發布並凍結lower／缺值規則後，S1才可執行。S1不得回接EWMA120 distance或moving-anchor exit結果。
 - [ ] 先建立共用 `PolicySpec`，把 `one_second_message_load_runner` 的 q95 常數／target／admission 泛化；不能只改下游 `attach_q95_boundaries`。
 - [ ] `one_second_makerfill_runner.attach_q95_boundaries` 改為 `attach_boundaries(policy_spec)`；q 組讀 D-1 distance，fixed 組為 `upper=lower=W` 並保存 constant-policy provenance。
 - [ ] `dynamic_estimated_path_portfolio.py` 移除 `frozen to q95`；每筆 position 保存 submit 當下 frozen lower。Delayed hedge 的 path 從**實際 hedge execution**後下一完整秒開始，不再硬要求恰為 fill+50 ms。
@@ -278,4 +283,5 @@ S1 前 handoff：
 | 8/22 q95 baseline | `order_message_load_*`、`one_second_makerfill_*`、`dynamic_future_hedge_*`、`dynamic_expiry_paired_close_*`、`dynamic_estimated_path_portfolio_*`、`august_exit_extension_*` | 230M | S0 baseline；S1 等價 q95 bundle 驗證後才可另議清理 |
 | A/B1–2 決策證據 | `makerfill_rank_l1_l5_sample_20260820_v5`、`future_ask_rank_l1_l5_indexed_sample_20260821_v1` | 13M | 僅支持 A/B1–2 與五日 calibration prior |
 | 八日 pilot | `fair_mid/`、`quote_fill/`、`quote_width/` | 110M | 歷史診斷，不作 S1–S5 績效分母 |
-| S0.5 基礎重驗 | `foundation_revalidation_s05_20260825_v1` | 137M | anchor／q／cohort／known-cost geometry；非execution／EV，selected-anchor lookup 重建的依據 |
+| S0.5 predecessor | `foundation_revalidation_s05_20260825_v1` | 137M | 歷史重驗；已由完整 selected-anchor rebuild 取代 |
+| S0.5 完整重作 | `foundation_selection_s05_rebuild_20260826_v1` | 1,021M | 15s anchor／Q2 trail20／conditional convergence／S1 mother／C1-control geometry；非execution／EV |

@@ -13,21 +13,27 @@ src/
 │   │           → one_second_makerfill_runner → dynamic_future_hedge(+provenance_migration)
 │   │           → dynamic_expiry_close → dynamic_estimated_path_portfolio → portfolio_cap_backtester
 │   │           → august_exit_extension；liquidity、walkforward、universe_manifest(_cli) 是基礎事實層
-│   ├── S0.5：foundation_anchor、foundation_boundary、foundation_geometry
-│   │          → foundation_revalidation_runner（131 日 canonical lookup 基礎重驗）
+│   ├── S0.5 predecessor：foundation_anchor、foundation_boundary、foundation_geometry
+│   │                     → foundation_revalidation_runner（EWMA120 基礎重驗）
+│   ├── S0.5 selection v1：foundation_anchor_selection、foundation_boundary_{batch,adaptation,
+│   │              orchestration,selection}、foundation_convergence_{lookup,selection}、
+│   │              foundation_cohort_selection、foundation_selected_geometry、
+│   │              foundation_selection_stats／registry → foundation_selection_runner
+│   ├── S0.5 frozen lower v2：foundation_frozen_convergence_runner
+│   │                            （upper-touch凍結絕對exit reference的獨立supplement）
 │   ├── 引擎：engine、replay、indexed_replay、layered、merged、raw_tape、targets、partial、
 │   │         hedge、hedge_study、execution_facts、execution_runner、pilot、study、
 │   │         exit_maker、exit_maker_study（期貨 route 與 exit maker 重作時借用）
 │   └── transaction_costs：費稅 profile
-└── tests/         # 37 個測試檔
+└── tests/         # unit／integration／canonical verifier tests
 ```
 
 執行環境：
 
 ```bash
 cd /home/kevin/Project/HFT/src/research/futures_spot_spread
-PYTHONPATH=. UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with polars --with pyarrow --with pytest \
-  python -m pytest -q maker/src/tests
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
+  python -m unittest discover -s maker/src/tests -t .
 ```
 
 因果線重跑順序（輸入都在 `maker/data/walkforward/`）：
@@ -43,17 +49,36 @@ python -m maker.src.quote_fill.one_second_makerfill_runner
 python -m maker.src.quote_fill.dynamic_future_hedge
 python -m maker.src.quote_fill.dynamic_expiry_close
 python -m maker.src.quote_fill.dynamic_estimated_path_portfolio
-python -m maker.src.quote_fill.foundation_revalidation_runner
+python -m maker.src.quote_fill.foundation_selection_runner all --execute
 ```
 
 各 runner 的 `--help` 與 `--verify-only` 是正式介面；輸出根目錄由各模組常數指定，重跑前先看
 `maker/doc/quote_fill/README.md` 對應文件。
 
-S0.5 canonical bundle 的 formal verifier：
+S0.5 selection v1 build（anchor／Q2／mother；既有moving-anchor convergence只作sensitivity）：
 
 ```bash
-python -m maker.src.quote_fill.foundation_revalidation_runner \
-  --verify-only --verify-inputs
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
+  python -u -m maker.src.quote_fill.foundation_selection_runner all --execute
+```
+
+不重算、只驗證 checkpoint／publication／protected-forward boundary：
+
+```bash
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
+  python -u -m maker.src.quote_fill.foundation_selection_runner verify-only
+```
+
+Frozen-at-upper-touch convergence v2（正式發布需clean commit）：
+
+```bash
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
+  python -u -m maker.src.quote_fill.foundation_frozen_convergence_runner \
+  publish --execute
+
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-project --with polars \
+  python -u -m maker.src.quote_fill.foundation_frozen_convergence_runner \
+  verify-only
 ```
 
 已知限制（見 `doc/quote_fill/DYNAMIC_CAUSAL_END_TO_END_STATUS_20260822.md`）：makerFill 是 mixed-clock

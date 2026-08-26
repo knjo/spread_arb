@@ -14,9 +14,11 @@ from maker.src.quote_fill.foundation_anchor_selection import (
 from maker.src.quote_fill.foundation_selection_runner import (
     CHECKPOINT_SCHEMA_VERSION,
     COUNT120_DIAGNOSTIC_ID,
+    DEFAULT_OUTPUT_ROOT,
     DEFAULT_REGISTRY_PATH,
     EXPECTED_PRIMARY_SESSION_COUNT,
     EXPECTED_SESSION_COUNT,
+    LEGACY_OUTPUT_ROOT_V1,
     SelectionPaths,
     _parser,
     _require_canonical_git_state,
@@ -50,8 +52,14 @@ class FoundationSelectionRegistryTest(unittest.TestCase):
 
         self.assertEqual(
             registry.payload["registry_version"],
-            "foundation_selection_s05_rebuild_registry_v1",
+            "foundation_selection_s05_rebuild_registry_v2",
         )
+        self.assertEqual(
+            registry.payload["convergence"]["reference_semantics"],
+            "frozen_anchor_at_upper_touch",
+        )
+        self.assertNotEqual(DEFAULT_OUTPUT_ROOT, LEGACY_OUTPUT_ROOT_V1)
+        self.assertTrue(DEFAULT_OUTPUT_ROOT.name.endswith("_v2"))
         self.assertEqual(len(sessions), EXPECTED_SESSION_COUNT)
         self.assertEqual(
             len([date for date in sessions if date >= "20260505"]),
@@ -485,6 +493,7 @@ class FoundationConvergenceRunnerTest(unittest.TestCase):
             "tod_bucket": "0905_1000",
             "boundary_quantile": 80,
             "convergence_candidate_id": candidate_id,
+            "convergence_reference_semantics": "frozen_anchor_at_upper_touch",
             "lookup_id": lookup_id,
             "lookback_sessions": 20 if lookup_id == "trail20_date_equal" else 60,
             "minimum_completed_dates": 1,
