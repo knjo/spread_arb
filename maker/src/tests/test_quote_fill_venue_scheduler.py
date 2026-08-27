@@ -20,6 +20,7 @@ def _request(
     event_sequence: int = 0,
     row_index: int = 0,
     stable_id: str | None = None,
+    risk_subtype: str | None = None,
     cutoff_drain: bool = False,
     maker_side: str | None = None,
     absolute_price_tick: int | None = None,
@@ -30,6 +31,11 @@ def _request(
         request_class=request_class,
         original_cursor=EventCursor(time_ns, event_sequence, row_index),
         stable_id=request_id if stable_id is None else stable_id,
+        risk_subtype=(
+            "hedge"
+            if request_class == "exposed_risk" and risk_subtype is None
+            else risk_subtype
+        ),
         cutoff_drain=cutoff_drain,
         maker_side=maker_side,
         absolute_price_tick=absolute_price_tick,
@@ -50,9 +56,7 @@ class RollingVenueSchedulerTest(unittest.TestCase):
             (),
         )
 
-        boundary = scheduler.dispatch(
-            EventCursor(10 + ONE_SECOND_NS, 5, 0)
-        )
+        boundary = scheduler.dispatch(EventCursor(10 + ONE_SECOND_NS, 5, 0))
         self.assertEqual([row.request_id for row in boundary], ["new-2"])
         self.assertEqual(boundary[0].queue_delay_ns, ONE_SECOND_NS)
 
@@ -68,6 +72,98 @@ class RollingVenueSchedulerTest(unittest.TestCase):
             [row.request_id for row in assignments],
             ["late-risk", "middle-cancel", "old-new"],
         )
+
+    def test_exposed_risk_subtype_priority_precedes_original_cursor(self) -> None:
+        scheduler = RollingVenueScheduler("spot", 3)
+        scheduler.enqueue(
+            _request(
+                "old-aggressive",
+                "exposed_risk",
+                1,
+                risk_subtype="aggressive_first_leg",
+            )
+        )
+        scheduler.enqueue(
+            _request("middle-hedge", "exposed_risk", 2, risk_subtype="hedge")
+        )
+        scheduler.enqueue(
+            _request(
+                "late-rollback",
+                "exposed_risk",
+                3,
+                risk_subtype="emergency_rollback",
+            )
+        )
+
+        assignments = scheduler.dispatch(EventCursor(4, 5, 0))
+
+        self.assertEqual(
+            [row.request_id for row in assignments],
+            ["late-rollback", "middle-hedge", "old-aggressive"],
+        )
+
+    def test_risk_subtype_is_required_only_for_exposed_risk(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires"):
+            VenueRequestIntent(
+                request_id="risk",
+                venue="spot",
+                request_class="exposed_risk",
+                original_cursor=EventCursor(1),
+                stable_id="risk",
+            )
+        with self.assertRaisesRegex(ValueError, "only exposed_risk"):
+            _request("new", "new", 1, risk_subtype="hedge")
+
+    def test_external_send_gate_skips_without_head_of_line_blocking(self) -> None:
+        scheduler = RollingVenueScheduler("spot", 2)
+        scheduler.enqueue(_request("blocked", "new", 1))
+        scheduler.enqueue(_request("eligible", "new", 2))
+
+        first = scheduler.dispatch(
+            EventCursor(3),
+            send_eligible=lambda request: request.request_id != "blocked",
+        )
+        self.assertEqual([row.request_id for row in first], ["eligible"])
+        self.assertEqual(
+            [request.request_id for request in scheduler.pending_requests],
+            ["blocked"],
+        )
+
+        second = scheduler.dispatch(EventCursor(4), send_eligible=lambda request: True)
+        self.assertEqual([row.request_id for row in second], ["blocked"])
+
+    def test_future_higher_priority_risk_does_not_block_ready_hedge(self) -> None:
+        scheduler = RollingVenueScheduler("future", 1)
+        scheduler.enqueue(
+            VenueRequestIntent(
+                request_id="future-rollback",
+                venue="future",
+                request_class="exposed_risk",
+                risk_subtype="emergency_rollback",
+                original_cursor=EventCursor(20),
+                stable_id="future-rollback",
+            )
+        )
+        scheduler.enqueue(
+            VenueRequestIntent(
+                request_id="ready-hedge",
+                venue="future",
+                request_class="exposed_risk",
+                risk_subtype="hedge",
+                original_cursor=EventCursor(10),
+                stable_id="ready-hedge",
+            )
+        )
+
+        assignments = scheduler.dispatch(EventCursor(10))
+        self.assertEqual([row.request_id for row in assignments], ["ready-hedge"])
+
+    def test_external_send_gate_must_return_boolean(self) -> None:
+        scheduler = RollingVenueScheduler("spot", 1)
+        scheduler.enqueue(_request("new", "new", 1))
+        with self.assertRaisesRegex(TypeError, "return boolean"):
+            scheduler.dispatch(EventCursor(1), send_eligible=lambda request: 1)
+        self.assertEqual(scheduler.pending_count, 1)
 
     def test_same_class_uses_cursor_cutoff_price_then_stable_id(self) -> None:
         scheduler = RollingVenueScheduler("spot", 5)
@@ -120,9 +216,7 @@ class RollingVenueSchedulerTest(unittest.TestCase):
 
     def test_future_intent_and_causal_phase_are_not_sent_early(self) -> None:
         scheduler = RollingVenueScheduler("spot", 1)
-        scheduler.enqueue(
-            _request("future", "new", 20, event_sequence=4)
-        )
+        scheduler.enqueue(_request("future", "new", 20, event_sequence=4))
 
         self.assertEqual(scheduler.next_token_time_ns(), 20)
         self.assertEqual(scheduler.dispatch(EventCursor(20, 3, 0)), ())

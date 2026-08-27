@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -23,6 +24,11 @@ from .layered import EventCursor
 ONE_SECOND_NS = 1_000_000_000
 
 RequestClass = Literal["exposed_risk", "cancel", "new"]
+RiskSubtype = Literal[
+    "emergency_rollback",
+    "hedge",
+    "aggressive_first_leg",
+]
 MakerSide = Literal["bid", "ask"]
 
 _REQUEST_CLASS_ORDER: tuple[RequestClass, ...] = (
@@ -31,8 +37,12 @@ _REQUEST_CLASS_ORDER: tuple[RequestClass, ...] = (
     "new",
 )
 _REQUEST_CLASS_RANK = {
-    request_class: rank
-    for rank, request_class in enumerate(_REQUEST_CLASS_ORDER)
+    request_class: rank for rank, request_class in enumerate(_REQUEST_CLASS_ORDER)
+}
+_RISK_SUBTYPE_RANK: dict[RiskSubtype, int] = {
+    "emergency_rollback": 0,
+    "hedge": 1,
+    "aggressive_first_leg": 2,
 }
 
 
@@ -50,6 +60,7 @@ class VenueRequestIntent:
     request_class: RequestClass
     original_cursor: EventCursor
     stable_id: str
+    risk_subtype: RiskSubtype | None = None
     cutoff_drain: bool = False
     maker_side: MakerSide | None = None
     absolute_price_tick: int | None = None
@@ -64,6 +75,13 @@ class VenueRequestIntent:
                 raise ValueError(f"{name} must be a non-empty string")
         if self.request_class not in _REQUEST_CLASS_RANK:
             raise ValueError(f"unsupported request_class: {self.request_class}")
+        if self.request_class == "exposed_risk":
+            if self.risk_subtype not in _RISK_SUBTYPE_RANK:
+                raise ValueError(
+                    "exposed_risk request requires a supported risk_subtype"
+                )
+        elif self.risk_subtype is not None:
+            raise ValueError("only exposed_risk requests can carry risk_subtype")
         if not isinstance(self.original_cursor, EventCursor):
             raise TypeError("original_cursor must be an EventCursor")
         if not isinstance(self.cutoff_drain, bool):
@@ -224,11 +242,16 @@ class RollingVenueScheduler:
         cursor: EventCursor,
         *,
         max_requests: int | None = None,
+        send_eligible: Callable[[VenueRequestIntent], bool] | None = None,
     ) -> tuple[VenueSendAssignment, ...]:
         """Freeze all currently possible send assignments at ``cursor``.
 
         ``max_requests`` can impose a caller-side bound below the available
-        venue tokens.  It does not reserve unused tokens.
+        venue tokens.  It does not reserve unused tokens.  ``send_eligible``
+        is an outer-loop pre-send revalidation hook for conditions the venue
+        scheduler does not own (for example current book legality or C9
+        capacity).  A false request remains pending and cannot head-of-line
+        block another eligible request of the same class.
         """
 
         if not isinstance(cursor, EventCursor):
@@ -244,6 +267,8 @@ class RollingVenueScheduler:
             or max_requests <= 0
         ):
             raise ValueError("max_requests must be a positive integer")
+        if send_eligible is not None and not callable(send_eligible):
+            raise TypeError("send_eligible must be callable")
 
         self._last_dispatch_cursor = cursor
         self._expire_tokens(cursor.recv_time_ns)
@@ -253,7 +278,7 @@ class RollingVenueScheduler:
 
         assignments: list[VenueSendAssignment] = []
         for _ in range(available):
-            request = self._pop_next_eligible(cursor)
+            request = self._pop_next_eligible(cursor, send_eligible)
             if request is None:
                 break
             assignment = VenueSendAssignment(
@@ -279,8 +304,7 @@ class RollingVenueScheduler:
         if not self._pending:
             return None
         earliest_intent_ns = min(
-            request.original_cursor.recv_time_ns
-            for request in self._pending.values()
+            request.original_cursor.recv_time_ns for request in self._pending.values()
         )
         if self._last_dispatch_cursor is None:
             return earliest_intent_ns
@@ -302,18 +326,34 @@ class RollingVenueScheduler:
     def _pop_next_eligible(
         self,
         cursor: EventCursor,
+        send_eligible: Callable[[VenueRequestIntent], bool] | None,
     ) -> VenueRequestIntent | None:
         for request_class in _REQUEST_CLASS_ORDER:
             heap = self._pending_heaps[request_class]
-            while heap and heap[0][1] not in self._pending:
-                heapq.heappop(heap)
-            if not heap:
-                continue
-            request = self._pending[heap[0][1]]
-            if request.original_cursor > cursor:
-                continue
-            heapq.heappop(heap)
-            return self._pending.pop(request.request_id)
+            deferred: list[tuple[tuple[object, ...], str]] = []
+            while heap:
+                item = heapq.heappop(heap)
+                request = self._pending.get(item[1])
+                if request is None:
+                    continue
+                if request.original_cursor > cursor:
+                    deferred.append(item)
+                    continue
+                if send_eligible is not None:
+                    eligible = send_eligible(request)
+                    if not isinstance(eligible, bool):
+                        heapq.heappush(heap, item)
+                        for deferred_item in deferred:
+                            heapq.heappush(heap, deferred_item)
+                        raise TypeError("send_eligible must return boolean")
+                    if not eligible:
+                        deferred.append(item)
+                        continue
+                for deferred_item in deferred:
+                    heapq.heappush(heap, deferred_item)
+                return self._pending.pop(request.request_id)
+            for deferred_item in deferred:
+                heapq.heappush(heap, deferred_item)
         return None
 
 
@@ -328,6 +368,16 @@ def _dispatch_order_key(request: VenueRequestIntent) -> tuple[object, ...]:
 def _within_class_order_key(
     request: VenueRequestIntent,
 ) -> tuple[object, ...]:
+    if request.request_class == "exposed_risk":
+        assert request.risk_subtype is not None
+        return (
+            _RISK_SUBTYPE_RANK[request.risk_subtype],
+            request.original_cursor.recv_time_ns,
+            request.original_cursor.event_sequence,
+            request.original_cursor.row_index,
+            request.stable_id,
+            0,
+        )
     if request.cutoff_drain:
         assert request.absolute_price_tick is not None
         assert request.maker_side is not None
@@ -359,6 +409,7 @@ __all__ = [
     "EventCursor",
     "MakerSide",
     "RequestClass",
+    "RiskSubtype",
     "RollingVenueScheduler",
     "VenueRequestIntent",
     "VenueSendAssignment",
