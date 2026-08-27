@@ -560,18 +560,25 @@ def _validate_prepared_day(
         raise S1ProductionRunError("prepare_day returned the wrong date/type")
     if prepared.policy_ids != POLICY_IDS:
         raise S1ProductionRunError("prepared day lacks the canonical seven policies")
+    entry_product_ids = frozenset(prepared.entry_product_ids)
     for product in prepared.products:
+        if product.product_id != product.value_code or product.future_contracts != 1:
+            raise S1ProductionRunError("prepared product identity/contract drifted")
+        if product.product_id not in entry_product_ids:
+            continue
         try:
             accounting_product = catalog[product.product_id]
         except KeyError as error:
-            raise S1ProductionRunError("prepared product is outside catalog") from error
+            raise S1ProductionRunError(
+                "prepared entry product is outside accounting catalog"
+            ) from error
         if (
-            product.product_id != product.value_code
-            or accounting_product.value_code != product.value_code
+            accounting_product.value_code != product.value_code
             or accounting_product.contract_size_shares != product.contract_size_shares
-            or product.future_contracts != 1
         ):
-            raise S1ProductionRunError("prepared product identity/contract drifted")
+            raise S1ProductionRunError(
+                "prepared entry product/accounting contract drifted"
+            )
 
 
 def _validate_opening_carry(
