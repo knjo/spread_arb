@@ -6,6 +6,7 @@ import json
 import unittest
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+from unittest.mock import patch
 
 from ..quote_fill.capacity_ledger import (
     CapacityIdentityRegistryReceipt,
@@ -1801,6 +1802,174 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         )
         self.assertEqual(report.expiry_marks, 2)
         self.assertEqual(restored.global_balances.total_committed_notional_twd, 0)
+
+    def test_same_timestamp_contract_expiries_share_one_capacity_replay(self) -> None:
+        first = observation(P1, D1_OPEN_NS, row=0, snapshot=61)
+        second = observation(P2, D1_OPEN_NS, row=1, snapshot=62)
+        third = observation(P3, D1_OPEN_NS, row=2, snapshot=63)
+        accounting_products = (
+            S1AccountingProduct(P1, P1, 2_000),
+            S1AccountingProduct(P2, P2, 2_000),
+            S1AccountingProduct(P3, P3, 2_000),
+        )
+        execution_date_resolver = (
+            lambda cursor: DATE if cursor.recv_time_ns < D2_OPEN_NS else NEXT_DATE
+        )
+        accounting = S1AccountingBridge(
+            default_date=DATE,
+            scenario_id="q95",
+            products=accounting_products,
+            execution_date_resolver=execution_date_resolver,
+        )
+        ledger = CapacityLedger(
+            global_cap_twd=20_000,
+            product_cap_twd=10_000,
+        )
+        day_one = S1EventLoop(
+            config(),
+            (
+                product(P1, session_end=D2_OPEN_NS - 1),
+                product(P2, session_end=D2_OPEN_NS - 1),
+                product(P3, session_end=D2_OPEN_NS - 1),
+            ),
+            entry_state_adapter=TimelineStateAdapter(
+                {P1: (first,), P2: (second,), P3: (third,)}
+            ),
+            fill_adapter=RelativeFillAdapter({P1: 100, P2: 100, P3: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=accounting,
+            capacity_ledger=ledger,
+        ).run(
+            (
+                book("future", P1, D1_OPEN_NS - 10, row=0, packet=970),
+                book("spot", P1, D1_OPEN_NS - 10, row=1, packet=971),
+                book("future", P2, D1_OPEN_NS - 10, row=2, packet=972),
+                book("spot", P2, D1_OPEN_NS - 10, row=3, packet=973),
+                book("future", P3, D1_OPEN_NS - 10, row=4, packet=974),
+                book("spot", P3, D1_OPEN_NS - 10, row=5, packet=975),
+                first,
+                second,
+                third,
+            )
+        )
+        self.assertEqual(len(day_one.carry_out), 3)
+
+        seed = ledger.to_seed(DATE)
+        day_one_facts = accounting.facts
+        reference_accounting = S1AccountingBridge.from_facts(
+            default_date=DATE,
+            scenario_id="q95",
+            products=accounting_products,
+            facts=day_one_facts,
+            execution_date_resolver=execution_date_resolver,
+        )
+        restored = CapacityLedger.from_seed(seed)
+        loop = S1EventLoop(
+            config(date=NEXT_DATE),
+            (
+                product(P1, end_date=NEXT_DATE),
+                product(P2, end_date=NEXT_DATE),
+                product(P3, end_date=NEXT_DATE),
+            ),
+            entry_state_adapter=TimelineStateAdapter({}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=accounting,
+            capacity_ledger=restored,
+            carry_in=day_one.carry_out,
+            day_open_time_ns=D2_OPEN_NS,
+        )
+        close_time = D2_OPEN_NS + 100
+        expiry_events = (
+            ContractExpiry(
+                official_close(
+                    P1,
+                    close_time,
+                    date=NEXT_DATE,
+                    row=0,
+                )
+            ),
+            ContractExpiry(
+                official_close(
+                    P2,
+                    close_time,
+                    date=NEXT_DATE,
+                    row=1,
+                )
+            ),
+            ContractExpiry(
+                official_close(
+                    P3,
+                    close_time,
+                    date=NEXT_DATE,
+                    row=2,
+                )
+            ),
+        )
+        with patch.object(restored, "verify", wraps=restored.verify) as verify:
+            day_two = loop.run(expiry_events)
+
+        reference_restored = CapacityLedger.from_seed(seed)
+        reference_loop = S1EventLoop(
+            config(date=NEXT_DATE),
+            (
+                product(P1, end_date=NEXT_DATE),
+                product(P2, end_date=NEXT_DATE),
+                product(P3, end_date=NEXT_DATE),
+            ),
+            entry_state_adapter=TimelineStateAdapter({}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=reference_accounting,
+            capacity_ledger=reference_restored,
+            carry_in=day_one.carry_out,
+            day_open_time_ns=D2_OPEN_NS,
+        )
+        reference_handler = reference_loop._process_contract_expiry
+
+        def process_with_per_event_verify(
+            event: ContractExpiry,
+            timestamp_ns: int,
+            *,
+            replay: object,
+        ) -> object:
+            del replay
+            return reference_handler(
+                event,
+                timestamp_ns,
+                replay=reference_restored.verify(),
+            )
+
+        with patch.object(
+            reference_loop,
+            "_process_contract_expiry",
+            side_effect=process_with_per_event_verify,
+        ):
+            reference_day_two = reference_loop.run(expiry_events)
+
+        self.assertEqual(verify.call_count, 3)
+        self.assertEqual(day_two, reference_day_two)
+        self.assertEqual(accounting.facts, reference_accounting.facts)
+        self.assertEqual(
+            restored.verify().transition_chain_sha256,
+            reference_restored.verify().transition_chain_sha256,
+        )
+        self.assertEqual(day_two.expiry_mark_count, 3)
+        self.assertEqual(day_two.carry_out, ())
+        self.assertEqual(
+            [row.event_type for row in day_two.capacity_transitions],
+            [
+                "expiry_basis_zero_release",
+                "expiry_basis_zero_release",
+                "expiry_basis_zero_release",
+            ],
+        )
+        self.assertEqual(
+            {mark.product_id for mark in day_two.expiry_marks},
+            {P1, P2, P3},
+        )
+        accounting.verify()
 
     def test_contract_expiry_rejects_metadata_or_missing_accounting(self) -> None:
         day_one, ledger = self._day_one_carry()

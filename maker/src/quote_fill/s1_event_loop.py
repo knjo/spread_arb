@@ -37,6 +37,7 @@ from .capacity_ledger import (
     DEFAULT_GLOBAL_CAP_TWD,
     DEFAULT_PRODUCT_CAP_TWD,
     CapacityLedger,
+    CapacityReplayResult,
     CapacityTransition,
 )
 from .layered import EventCursor
@@ -1627,6 +1628,12 @@ class S1EventLoop:
             key=_external_sort_key,
         )
         expiry = False
+        # ContractExpiry is the only external handler that mutates capacity,
+        # and each capacity identity belongs to exactly one product.  A release
+        # for an earlier product therefore cannot change the pre-expiry account
+        # slice inspected by a later product.  Reuse one immutable replay per
+        # timestamp; each release still validates against the live ledger.
+        contract_expiry_replay: CapacityReplayResult | None = None
         for event in events:
             if isinstance(event, VenueBookUpdate):
                 if self.risk_book_adapter is not None:
@@ -1638,7 +1645,11 @@ class S1EventLoop:
                     self._exit_probe_products[timestamp_ns].add(event.product_id)
                 continue
             if isinstance(event, ContractExpiry):
-                self._process_contract_expiry(event, timestamp_ns)
+                contract_expiry_replay = self._process_contract_expiry(
+                    event,
+                    timestamp_ns,
+                    replay=contract_expiry_replay,
+                )
                 continue
             if isinstance(event, EntryObservation):
                 if (
@@ -1677,6 +1688,11 @@ class S1EventLoop:
             if self._expiry_applied or expiry:
                 raise ValueError("session expiry appears more than once")
             expiry = True
+        if contract_expiry_replay is not None:
+            # Validate every release in the batch before accounting marks are
+            # emitted in the settlement phase.  This keeps the verification
+            # cost constant in the number of expiring products.
+            self._ledger.verify()
         return expiry
 
     def _refresh_actual_send_state(self, timestamp_ns: int) -> None:
@@ -1725,7 +1741,9 @@ class S1EventLoop:
         self,
         event: ContractExpiry,
         timestamp_ns: int,
-    ) -> None:
+        *,
+        replay: CapacityReplayResult | None,
+    ) -> CapacityReplayResult:
         close = event.close
         product_id = close.product_id
         if product_id in self._contract_expired_product_ids:
@@ -1746,7 +1764,8 @@ class S1EventLoop:
         if self.accounting_adapter is None:
             raise ValueError("ContractExpiry requires an accounting_adapter")
 
-        replay = self._ledger.verify()
+        if replay is None:
+            replay = self._ledger.verify()
         positions_by_capacity = {
             position.capacity_id: position
             for position in self._positions.values()
@@ -1856,6 +1875,7 @@ class S1EventLoop:
                     close=close,
                 )
             )
+        return replay
 
     def _process_contract_expiry_settlements(self, timestamp_ns: int) -> None:
         pending = tuple(self._expiry_settlements)
