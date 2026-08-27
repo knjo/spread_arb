@@ -164,6 +164,12 @@ class S1ProductionRunnerIntegrationTest(unittest.TestCase):
                 product_id="product-1",
                 requested_notional_twd=100,
             )
+            ledger.release_working_leaves(
+                transition_id="release-1",
+                timestamp_ns=2,
+                capacity_id="capacity-1",
+                reason="actual_cancel",
+            )
             receipt = registry.commit_partition(
                 POLICY_IDS[0],
                 S1_DEVELOPMENT_DATES[0],

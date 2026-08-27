@@ -1167,16 +1167,33 @@ def _verify_resumed_capacity_partition(
         transitions,
         compact_checkpoint=prior,
     )
-    comparisons = {
-        "account_balances": checkpoint.account_balances,
-        "account_products": checkpoint.account_products,
-        "product_balances": checkpoint.product_balances,
-        "global_balances": checkpoint.global_balances,
-        "last_sequence": checkpoint.transition_sequence_offset,
-        "transition_chain_sha256": checkpoint.transition_chain_sha256,
+    live_account_balances = {
+        capacity_id: balances
+        for capacity_id, balances in replay.account_balances.items()
+        if balances.total_committed_notional_twd != 0
     }
-    for name, expected in comparisons.items():
-        if getattr(replay, name) != expected:
+    live_account_products = {
+        capacity_id: replay.account_products[capacity_id]
+        for capacity_id in live_account_balances
+    }
+    live_product_balances = {
+        product_id: balances
+        for product_id, balances in replay.product_balances.items()
+        if balances.total_committed_notional_twd != 0
+    }
+    comparisons = {
+        "account_balances": (live_account_balances, checkpoint.account_balances),
+        "account_products": (live_account_products, checkpoint.account_products),
+        "product_balances": (live_product_balances, checkpoint.product_balances),
+        "global_balances": (replay.global_balances, checkpoint.global_balances),
+        "last_sequence": (replay.last_sequence, checkpoint.transition_sequence_offset),
+        "transition_chain_sha256": (
+            replay.transition_chain_sha256,
+            checkpoint.transition_chain_sha256,
+        ),
+    }
+    for name, (actual, expected) in comparisons.items():
+        if actual != expected:
             raise S1ProductionRunError(
                 f"resumed capacity partition/checkpoint {name} differs"
             )
