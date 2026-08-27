@@ -2140,6 +2140,24 @@ class S1EventLoop:
                     "day_open_time_ns must follow the carried ledger cursor"
                 )
         seen_transition_ids = set(replay.seen_transition_ids)
+        historical_establishments: dict[str, PositionEstablishedFact] = {}
+        if self.carry_in and self._ledger.historical_transition_identities_omitted:
+            adapter_facts = getattr(self.accounting_adapter, "facts", None)
+            if not isinstance(adapter_facts, tuple):
+                raise ValueError(
+                    "compact carry provenance requires replayed accounting facts"
+                )
+            assert self.accounting_adapter is not None
+            self.accounting_adapter.verify()
+            for value in adapter_facts:
+                if not isinstance(value, PositionEstablishedFact):
+                    continue
+                if value.position_id in historical_establishments:
+                    raise ValueError(
+                        "compact carry accounting history contains duplicate "
+                        "establishments"
+                    )
+                historical_establishments[value.position_id] = value
         initiating_raw_ids: set[str] = set()
         hedge_ids: set[str] = set()
         for carry in self.carry_in:
@@ -2191,9 +2209,14 @@ class S1EventLoop:
                     "carry capacity transition differs from S1 identity contract"
                 )
             if fact.capacity_transition_id not in seen_transition_ids:
-                raise ValueError(
-                    "carry establishment transition is absent from capacity ledger"
-                )
+                if not self._ledger.historical_transition_identities_omitted:
+                    raise ValueError(
+                        "carry establishment transition is absent from capacity ledger"
+                    )
+                if historical_establishments.get(fact.position_id) != fact:
+                    raise ValueError(
+                        "compact carry establishment differs from accounting history"
+                    )
             if carry.hedge_intent_id != f"{fact.position_id}/hedge":
                 raise ValueError("carry hedge_intent_id differs from S1 contract")
             if carry.initiating_raw_order_fact_id in initiating_raw_ids:

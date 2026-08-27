@@ -833,6 +833,12 @@ class CapacityLedger:
         return tuple(self._transitions)
 
     @property
+    def historical_transition_identities_omitted(self) -> bool:
+        """Whether this ledger resumed from an externally attested compact state."""
+
+        return self._replay_compact_checkpoint is not None
+
+    @property
     def global_balances(self) -> BucketBalances:
         return self._global_balances
 

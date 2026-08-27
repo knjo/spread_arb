@@ -7,7 +7,10 @@ import unittest
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 
-from ..quote_fill.capacity_ledger import CapacityLedger
+from ..quote_fill.capacity_ledger import (
+    CapacityIdentityRegistryReceipt,
+    CapacityLedger,
+)
 from ..quote_fill.layered import EventCursor
 from ..quote_fill.s1_accounting import (
     ExpiryAccountingMark,
@@ -1593,6 +1596,85 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         )
         self.assertEqual(terminal.terminal_date, NEXT_DATE)
         accounting.verify()
+
+    def test_compact_checkpoint_validates_carry_through_accounting_provenance(
+        self,
+    ) -> None:
+        accounting = S1AccountingBridge(
+            default_date=DATE,
+            scenario_id="q95",
+            products=(S1AccountingProduct(P1, P1, 2_000),),
+            execution_date_resolver=(
+                lambda cursor: DATE if cursor.recv_time_ns < D2_OPEN_NS else NEXT_DATE
+            ),
+        )
+        day_one, ledger = self._day_one_carry(accounting=accounting)
+        receipt = CapacityIdentityRegistryReceipt(
+            schema_version=1,
+            transition_count=len(ledger.transitions),
+            admitted_count=sum(
+                transition.event_type == "new_reservation_attempt"
+                and transition.admitted is True
+                for transition in ledger.transitions
+            ),
+            registry_sha256="1" * 64,
+        )
+        restored = CapacityLedger.from_compact_checkpoint(
+            ledger.to_compact_checkpoint(DATE, identity_registry_receipt=receipt)
+        )
+
+        loop = S1EventLoop(
+            config(date=NEXT_DATE),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=accounting,
+            capacity_ledger=restored,
+            carry_in=day_one.carry_out,
+            day_open_time_ns=D2_OPEN_NS,
+        )
+        self.assertTrue(restored.historical_transition_identities_omitted)
+        self.assertEqual(loop.carry_in, day_one.carry_out)
+        self.assertEqual(restored.transitions, ())
+
+        carry = day_one.carry_out[0]
+        with self.assertRaisesRegex(ValueError, "replayed accounting facts"):
+            S1EventLoop(
+                config(date=NEXT_DATE),
+                (product(P1),),
+                entry_state_adapter=TimelineStateAdapter({}),
+                normal_exit_enabled=True,
+                spot_trade_adapter=SyntheticSpotTrades(()),
+                capacity_ledger=CapacityLedger.from_compact_checkpoint(
+                    ledger.to_compact_checkpoint(
+                        DATE, identity_registry_receipt=receipt
+                    )
+                ),
+                carry_in=day_one.carry_out,
+                day_open_time_ns=D2_OPEN_NS,
+            )
+
+        tampered_fact = replace(
+            carry.position_established_fact,
+            sequence=carry.position_established_fact.sequence + 1,
+        )
+        with self.assertRaisesRegex(ValueError, "differs from accounting history"):
+            S1EventLoop(
+                config(date=NEXT_DATE),
+                (product(P1),),
+                entry_state_adapter=TimelineStateAdapter({}),
+                normal_exit_enabled=True,
+                spot_trade_adapter=SyntheticSpotTrades(()),
+                accounting_adapter=accounting,
+                capacity_ledger=CapacityLedger.from_compact_checkpoint(
+                    ledger.to_compact_checkpoint(
+                        DATE, identity_registry_receipt=receipt
+                    )
+                ),
+                carry_in=(replace(carry, position_established_fact=tampered_fact),),
+                day_open_time_ns=D2_OPEN_NS,
+            )
 
     def test_contract_expiry_marks_exact_pair_without_execution_or_cost(self) -> None:
         close_time = D2_OPEN_NS + 100
