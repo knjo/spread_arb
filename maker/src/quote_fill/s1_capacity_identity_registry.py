@@ -45,7 +45,7 @@ from .capacity_ledger import (
     CapacityTransition,
 )
 
-S1_CAPACITY_IDENTITY_REGISTRY_SCHEMA_VERSION = 1
+S1_CAPACITY_IDENTITY_REGISTRY_SCHEMA_VERSION = 2
 
 _REGISTRY_CHAIN_DOMAIN = "s1-capacity-identity-registry-chain-v1"
 _TRANSITION_IDS_DOMAIN = "s1-capacity-transition-ids-v1"
@@ -147,15 +147,10 @@ _TABLE_DDLS: dict[str, str] = {
         CREATE TABLE transition_identities (
             policy_id TEXT NOT NULL,
             transition_id TEXT NOT NULL,
-            partition_date TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 1),
-            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
             PRIMARY KEY (policy_id, transition_id),
-            UNIQUE (policy_id, sequence),
-            UNIQUE (policy_id, partition_date, ordinal),
-            FOREIGN KEY (policy_id, partition_date)
-                REFERENCES partition_receipts (policy_id, partition_date)
-        ) STRICT
+            UNIQUE (policy_id, sequence)
+        ) WITHOUT ROWID, STRICT
     """,
     "admitted_capacity_identities": """
         CREATE TABLE admitted_capacity_identities (
@@ -422,22 +417,16 @@ class S1CapacityIdentityRegistry:
                     INSERT INTO transition_identities (
                         policy_id,
                         transition_id,
-                        partition_date,
-                        sequence,
-                        ordinal
-                    ) VALUES (?, ?, ?, ?, ?)
+                        sequence
+                    ) VALUES (?, ?, ?)
                     """,
                     (
                         (
                             incoming.policy_id,
                             transition_id,
-                            incoming.partition_date,
                             sequence,
-                            ordinal,
                         )
-                        for ordinal, (sequence, transition_id) in enumerate(
-                            incoming.transition_identities
-                        )
+                        for sequence, transition_id in incoming.transition_identities
                     ),
                 )
                 connection.executemany(
@@ -849,10 +838,14 @@ class S1CapacityIdentityRegistry:
                 """
                 SELECT sequence, transition_id
                 FROM transition_identities
-                WHERE policy_id = ? AND partition_date = ?
-                ORDER BY ordinal
+                WHERE policy_id = ? AND sequence BETWEEN ? AND ?
+                ORDER BY sequence
                 """,
-                (incoming.policy_id, incoming.partition_date),
+                (
+                    incoming.policy_id,
+                    int(existing["sequence_start"]),
+                    int(existing["sequence_end"]),
+                ),
             )
         )
         stored_admitted = tuple(
@@ -1096,20 +1089,20 @@ class S1CapacityIdentityRegistry:
             transition_rows = tuple(
                 connection.execute(
                     """
-                    SELECT transition_id, sequence, ordinal
+                    SELECT transition_id, sequence
                     FROM transition_identities
-                    WHERE policy_id = ? AND partition_date = ?
-                    ORDER BY ordinal
+                    WHERE policy_id = ? AND sequence BETWEEN ? AND ?
+                    ORDER BY sequence
                     """,
-                    (policy_id, current_date),
+                    (
+                        policy_id,
+                        int(partition["sequence_start"]),
+                        int(partition["sequence_end"]),
+                    ),
                 )
             )
             transition_identities: list[tuple[int, str]] = []
-            for ordinal, row in enumerate(transition_rows):
-                if int(row["ordinal"]) != ordinal:
-                    raise CapacityIdentityRegistryIntegrityError(
-                        "transition identity ordinals are not contiguous"
-                    )
+            for row in transition_rows:
                 sequence = int(row["sequence"])
                 transition_id = _identifier(
                     str(row["transition_id"]),

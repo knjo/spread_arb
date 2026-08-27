@@ -190,6 +190,15 @@ class S1CapacityIdentityRegistryTest(unittest.TestCase):
             expected_previous_receipt=first_receipt,
         )
         self.assertEqual(
+            self.registry.commit_partition(
+                "policy-a",
+                "20260506",
+                (),
+                expected_previous_receipt=first_receipt,
+            ),
+            second_receipt,
+        )
+        self.assertEqual(
             second_receipt.transition_count, first_receipt.transition_count
         )
         self.assertNotEqual(
@@ -232,6 +241,38 @@ class S1CapacityIdentityRegistryTest(unittest.TestCase):
             S1CapacityIdentityRegistry(missing, readonly=True)
 
         self.assertFalse(missing.exists())
+
+    def test_v2_transition_identity_schema_is_exact_and_compact(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            columns = tuple(
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(transition_identities)"
+                )
+            )
+            ddl = connection.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'transition_identities'
+                """
+            ).fetchone()[0]
+            indexes = tuple(
+                (row[1], row[3])
+                for row in connection.execute(
+                    "PRAGMA index_list(transition_identities)"
+                )
+            )
+
+        self.assertEqual(columns, ("policy_id", "transition_id", "sequence"))
+        self.assertIn("WITHOUT ROWID", ddl)
+        self.assertEqual(
+            indexes,
+            (
+                ("sqlite_autoindex_transition_identities_2", "u"),
+                ("sqlite_autoindex_transition_identities_1", "pk"),
+            ),
+        )
 
     def test_same_partition_is_idempotent_but_content_drift_and_stale_retry_fail(
         self,
