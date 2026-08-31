@@ -11,6 +11,7 @@ from ..quote_fill.s1_hedge import (
     RawBookCursor,
     RawBookLevel,
 )
+from ..quote_fill.targets import absolute_price_tick
 
 
 def _book(
@@ -52,6 +53,8 @@ class S1SpotAskTargetTest(unittest.TestCase):
             scenario_id="q95/spot-ask",
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=0.0,
+            frozen_exit_target_price=100.0,
+            frozen_exit_absolute_price_tick=absolute_price_tick(100.0),
             spot_book=spot,
             future_book=future,
         )
@@ -84,6 +87,8 @@ class S1SpotAskTargetTest(unittest.TestCase):
             scenario_id="q95/spot-ask",
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=0.0,
+            frozen_exit_target_price=100.0,
+            frozen_exit_absolute_price_tick=absolute_price_tick(100.0),
             spot_book=spot,
             future_book=future_inside,
         )
@@ -103,6 +108,8 @@ class S1SpotAskTargetTest(unittest.TestCase):
             scenario_id="q95/spot-ask",
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=0.0,
+            frozen_exit_target_price=102.0,
+            frozen_exit_absolute_price_tick=absolute_price_tick(102.0),
             spot_book=spot,
             future_book=future_deeper,
         )
@@ -111,7 +118,7 @@ class S1SpotAskTargetTest(unittest.TestCase):
         self.assertFalse(deeper.queue_observable)
         self.assertTrue(deeper.gate_open)
 
-    def test_trial_match_and_future_depth_fail_closed(self) -> None:
+    def test_spot_gate_closes_but_future_depth_is_diagnostic_only(self) -> None:
         cursor = EventCursor(200)
         trial = _book(
             190,
@@ -133,12 +140,15 @@ class S1SpotAskTargetTest(unittest.TestCase):
             scenario_id="q95/spot-ask",
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=0.0,
+            frozen_exit_target_price=100.0,
+            frozen_exit_absolute_price_tick=absolute_price_tick(100.0),
             spot_book=trial,
             future_book=future,
         )
         self.assertFalse(target.gate_open)
         self.assertEqual(target.gate_reason, "trial_match")
-        self.assertIsNone(target.target_price)
+        self.assertEqual(target.target_price, 100.0)
+        self.assertEqual(target.absolute_price_tick, absolute_price_tick(100.0))
 
         spot = _book(
             190,
@@ -158,12 +168,85 @@ class S1SpotAskTargetTest(unittest.TestCase):
             scenario_id="q95/spot-ask",
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=0.0,
+            frozen_exit_target_price=100.0,
+            frozen_exit_absolute_price_tick=absolute_price_tick(100.0),
             spot_book=spot,
             future_book=shallow_future,
             future_contracts=2,
         )
-        self.assertFalse(shallow.gate_open)
-        self.assertEqual(shallow.gate_reason, "insufficient_depth")
+        self.assertTrue(shallow.gate_open)
+        self.assertEqual(shallow.gate_reason, "eligible")
+        self.assertIsNone(shallow.future_buy_vwap)
+        self.assertIsNone(shallow.effective_exit_basis_bp)
+
+    def test_future_ask_changes_and_missing_book_never_move_frozen_target(self) -> None:
+        cursor = EventCursor(200)
+        spot = _book(
+            190,
+            bids=((99.0, 2_000),),
+            asks=((101.0, 3_000),),
+        )
+
+        def observe(future: CausalBookState | None):
+            return build_s1_spot_ask_target(
+                date="20260505",
+                value_code="2330",
+                quote_code="CDFE6",
+                position_id="position-1",
+                scenario_id="q95/spot-ask",
+                observation_cursor=cursor,
+                frozen_exit_threshold_basis_bp=500.0,
+                frozen_exit_target_price=100.0,
+                frozen_exit_absolute_price_tick=absolute_price_tick(100.0),
+                spot_book=spot,
+                future_book=future,
+            )
+
+        at_100 = observe(
+            _book(
+                191,
+                bids=((99.5, 5),),
+                asks=((100.0, 5),),
+            )
+        )
+        at_102 = observe(
+            _book(
+                192,
+                bids=((101.5, 5),),
+                asks=((102.0, 5),),
+            )
+        )
+        missing = observe(None)
+
+        for target in (at_100, at_102, missing):
+            self.assertTrue(target.gate_open)
+            self.assertEqual(target.target_price, 100.0)
+            self.assertEqual(
+                target.absolute_price_tick,
+                absolute_price_tick(100.0),
+            )
+        self.assertNotEqual(
+            at_100.effective_exit_basis_bp,
+            at_102.effective_exit_basis_bp,
+        )
+        self.assertIsNone(missing.effective_exit_basis_bp)
+        self.assertIsNone(missing.future_book_cursor)
+
+    def test_frozen_price_tick_mismatch_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "price/tick mismatch"):
+            build_s1_spot_ask_target(
+                date="20260505",
+                value_code="2330",
+                quote_code="CDFE6",
+                position_id="position-1",
+                scenario_id="q95/spot-ask",
+                observation_cursor=EventCursor(200),
+                frozen_exit_threshold_basis_bp=0.0,
+                frozen_exit_target_price=100.0,
+                frozen_exit_absolute_price_tick=absolute_price_tick(100.5),
+                spot_book=None,
+                future_book=None,
+            )
 
 
 if __name__ == "__main__":

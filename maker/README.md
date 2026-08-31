@@ -9,7 +9,7 @@
 - [`src/`](src/README.md)：可重跑的資料處理、模型及回測程式。
 - [`data/`](data/README.md)：基礎事實、因果 manifest 與各 run 輸出；不進 Git。
 
-## 現況（2026-08-26）
+## 現況（2026-09-01）
 
 主線是 **動態商品池因果 pipeline**：月 M 只用完整 M-1 選商品池、日 D 只看 D-1 流動性 gate，再做 1 Hz quote intent →
 approximate makerFill → +50 ms 期貨 hedge → 同日／跨日／到期 terminal path → inventory cap 回放。既有 10–50M
@@ -48,9 +48,17 @@ nominal同日已知成本後margin p50為+0.827／+3.302／+7.466 bp。更深low
 diagnostic。取樣仍用 SpreadPairTotalCount epoch 與 1 Hz final-net；entry只掛 A/B1–2；hedge基準為
 `fill RecvTime + 50 ms`，當下不可執行才依 B6 往後最多5秒找第一個合法足量 book。
 
-S1 round-trip 開跑前只剩凍結唯一normal-exit lower scheme、unsupported lookup行為與預註冊subgroup。七組仍全跑
-共同mother，不加policy-specific mother gate。若採C2→C0，必須建立明示composite policy ID，不能冒稱reach80。
-S0是`cap=∞` quote-only診斷；S0.5是
-known-cost pre-replay foundation；兩者都不可直接當成20M績效或可部署baseline。
+S1 已依停止後稽核重建為 cost-aware 七組：一個 ungated q95/C0 control，加六個凍結
+`q × C0/C2/C3 × same-day/overnight cost floor`／fixed20 deployment candidates。每組保留相同 62,552 個
+mother×TOD cells；unsupported lookup是 explicit no-trade，不刪共同分母。六組在 actual new-send 以當下 Spot maker
+target、Future executable bid／ask、完整已知稅費與 safety floor做 admission；control只供辨識 gate影響，不進 shortlist。
+
+Normal exit已改為在entry actual-send鎖定 absolute Spot Ask price／tick，後續 Future Ask不會重設 maker target；route維持
+`Spot Ask maker → Future buy taker`，不是 taker+taker。20M global／10M single-product chronological cap、B6最長5秒
+retry、逐腿成本 ledger、SSD2 Spot／makerFill與NAS individual-stock-futures path contract、cost/publication audits均已進入
+整體驗證。完整facts後仍open的position已接上8/13 13:20共同全量executable mark；同商品先聚合數量再掃depth，並把已發生
+成本與剩餘exit成本納入economic ranking。正式 replay 前仍須完成clean-source commit與單partition smoke；因此
+目前沒有新的71日 S1績效、champion或可部署baseline。S0是`cap=∞` quote-only診斷；S0.5是known-cost pre-replay
+foundation；兩者也不可直接當成20M績效。
 
 既有 `../taker/` 是獨立的 taker 研究線，本目錄不依賴它。

@@ -100,6 +100,8 @@ def target(
         scenario_id=scenario_id,
         observation_cursor=observation_cursor,
         frozen_exit_threshold_basis_bp=0.0,
+        frozen_exit_target_price=float(tick) if tick is not None else 100.0,
+        frozen_exit_absolute_price_tick=tick if tick is not None else 100,
         future_buy_vwap=100.0 if gate_open else None,
         target_price=float(tick) if tick is not None else None,
         absolute_price_tick=tick,

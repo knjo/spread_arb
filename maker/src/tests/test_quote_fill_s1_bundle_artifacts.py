@@ -43,6 +43,30 @@ class S1BundleArtifactsTest(unittest.TestCase):
             "capacity_transition_records": [
                 {"transition": "reserve", "position_id": "p1", "quantity": 1}
             ],
+            "economic_gate_estimate_records": [
+                {
+                    "schema_version": "s1_economic_gate_event_v2_frozen_exit",
+                    "evaluation_stage": "decision_observation",
+                    "status": "below_floor",
+                },
+                {
+                    "schema_version": "s1_economic_gate_event_v2_frozen_exit",
+                    "evaluation_stage": "actual_send_refresh",
+                    "status": "eligible",
+                },
+            ],
+            "economic_gate_event_records": [
+                {
+                    "schema_version": "s1_economic_gate_actual_send_audit_v1",
+                    "dispatch_outcome": "sent",
+                    "raw_order_fact_id": "order-1",
+                    "estimate": {
+                        "schema_version": "s1_economic_gate_event_v2_frozen_exit",
+                        "evaluation_stage": "actual_send_refresh",
+                        "status": "eligible",
+                    },
+                },
+            ],
             "compact_checkpoint_record": {
                 "accounting_fact_count": 2,
                 "capacity_transition_count": 1,
@@ -82,11 +106,33 @@ class S1BundleArtifactsTest(unittest.TestCase):
                 tuple(payload["accounting_fact_records"]),
             )
             self.assertEqual(
+                tuple(read.economic_gate_estimate_records),
+                tuple(payload["economic_gate_estimate_records"]),
+            )
+            self.assertEqual(
+                tuple(read.economic_gate_event_records),
+                tuple(payload["economic_gate_event_records"]),
+            )
+            self.assertEqual(read.economic_gate_estimate_records.record_count, 2)
+            estimate_metadata = read.complete_marker["artifacts"][
+                "economic_gate_estimates.jsonl.gz"
+            ]
+            self.assertEqual(estimate_metadata["record_count"], 2)
+            self.assertEqual(estimate_metadata["format"], "gzip_jsonl")
+            self.assertEqual(
                 (first / "accounting_facts.jsonl.gz").read_bytes(),
                 (second / "accounting_facts.jsonl.gz").read_bytes(),
             )
             self.assertEqual(
+                (first / "economic_gate_estimates.jsonl.gz").read_bytes(),
+                (second / "economic_gate_estimates.jsonl.gz").read_bytes(),
+            )
+            self.assertEqual(
                 (first / "capacity_transitions.jsonl.gz").read_bytes()[4:8],
+                b"\0\0\0\0",
+            )
+            self.assertEqual(
+                (first / "economic_gate_estimates.jsonl.gz").read_bytes()[4:8],
                 b"\0\0\0\0",
             )
             self.assertEqual(
@@ -145,7 +191,7 @@ class S1BundleArtifactsTest(unittest.TestCase):
 
             missing = root / "missing"
             write_s1_bundle_partition(missing, **self.payload())
-            (missing / "carry.json").unlink()
+            (missing / "economic_gate_estimates.jsonl.gz").unlink()
             with self.assertRaisesRegex(S1BundleArtifactError, "artifact set"):
                 read_s1_bundle_partition(missing, **self.expected(payload))
 
@@ -157,7 +203,7 @@ class S1BundleArtifactsTest(unittest.TestCase):
 
             gzip_drift = root / "gzip-drift"
             write_s1_bundle_partition(gzip_drift, **self.payload())
-            gzip_path = gzip_drift / "capacity_transitions.jsonl.gz"
+            gzip_path = gzip_drift / "economic_gate_estimates.jsonl.gz"
             damaged = bytearray(gzip_path.read_bytes())
             damaged[-1] ^= 1
             gzip_path.write_bytes(damaged)
@@ -184,6 +230,23 @@ class S1BundleArtifactsTest(unittest.TestCase):
             }
 
             with self.assertRaises(S1BundleArtifactError):
+                write_s1_bundle_partition(partition, **payload)
+            self.assertFalse(partition.exists())
+
+    def test_invalid_economic_gate_estimate_never_publishes_partition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            partition = Path(directory) / "partition"
+            payload = self.payload()
+            payload["economic_gate_estimate_records"] = [
+                {
+                    "schema_version": "s1_economic_gate_event_v2_frozen_exit",
+                    "selected_expected_margin_bp": math.nan,
+                }
+            ]
+
+            with self.assertRaisesRegex(
+                S1BundleArtifactError, "economic_gate_estimate_records"
+            ):
                 write_s1_bundle_partition(partition, **payload)
             self.assertFalse(partition.exists())
 

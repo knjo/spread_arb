@@ -220,6 +220,7 @@ class S1EntryStateAdapterTest(unittest.TestCase):
         assert state is not None
         self.assertFalse(state.base_gate_open)
         self.assertEqual(state.gate_reason, "trial_match")
+        self.assertEqual(state.base_gate_book_wake_venues, frozenset(("future",)))
 
         changes = pl.DataFrame(
             {
@@ -230,6 +231,32 @@ class S1EntryStateAdapterTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "duplicated"):
             tuple(adapter.iter_observations(changes))
+
+    def test_unavailable_future_ask_requests_only_future_book_wake(self) -> None:
+        provider = Provider()
+        assert provider.future is not None
+        provider.future = CausalBookState(
+            provider.future.book_cursor,
+            True,
+            None,
+            provider.future.reference_price,
+            provider.future.bids,
+            (),
+        )
+        adapter = S1EntryStateAdapter(
+            _common(),
+            _specs(),
+            date=DATE,
+            policy_id="fixed20",
+            book_provider=provider,
+        )
+
+        state = adapter.current_state("2330", EventCursor(_time_ns(300), 200, 1))
+
+        assert state is not None
+        self.assertFalse(state.base_gate_open)
+        self.assertEqual(state.gate_reason, "empty_future_book")
+        self.assertEqual(state.base_gate_book_wake_venues, frozenset(("future",)))
 
 
 if __name__ == "__main__":

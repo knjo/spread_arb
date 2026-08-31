@@ -5,13 +5,14 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from inspect import signature
 from types import MappingProxyType
 
 import polars as pl
 
 from ..quote_fill.capacity_ledger import CapacityLedger
 from ..quote_fill.makerfill_adapter import MakerFillLabelIndex
-from ..quote_fill.policy_spec import TOD_BUCKETS, PolicySpec
+from ..quote_fill.policy_spec import POLICY_IDS, TOD_BUCKETS, PolicySpec
 from ..quote_fill.s1_accounting_bridge import (
     S1AccountingBridge,
     S1AccountingProduct,
@@ -21,17 +22,30 @@ from ..quote_fill.s1_entry_day_runner import (
     PreparedS1EntryDay,
     _extend_identities_with_required_exit_only_bindings,
     _products_from_identities,
+    _specs_by_policy,
     _validate_development_date,
+    _validate_policy_ids,
     _validated_product_identities,
+    prepare_s1_entry_day,
     run_s1_entry_policies,
     run_s1_entry_policy,
 )
 from ..quote_fill.s1_event_loop import S1CarryContractBinding, S1Product
 from ..quote_fill.s1_raw_book_adapter import build_raw_book_day_index
+from ..quote_fill.s1_scenario_spec import (
+    SCENARIO_IDS,
+    S1ScenarioSpec,
+    build_s1_scenario_spec_table,
+)
 from ..quote_fill.s1_spot_close_adapter import SpotCloseDayIndex
 from ..quote_fill.s1_spot_trade_adapter import (
     SpotTradeDayIndex,
     build_spot_trade_day_index,
+)
+from .test_quote_fill_s1_scenario_spec import (
+    _convergence,
+    _entry_lookup,
+    _mother,
 )
 
 DATE = "20260505"
@@ -291,8 +305,8 @@ class S1EntryDayRunnerTest(unittest.TestCase):
         self.assertEqual(extended["ValueCode"].to_list(), ["2330", "2603"])
         carry = extended.filter(pl.col("ValueCode") == "2603").row(0, named=True)
         self.assertEqual(carry["QuoteCode"], "CZFE6")
-        self.assertEqual(carry["spot_ref_price"], 50.0)
-        self.assertEqual(carry["fut_ref_price"], 50.5)
+        self.assertAlmostEqual(carry["spot_ref_price"], 50.0)
+        self.assertAlmostEqual(carry["fut_ref_price"], 50.5)
 
     def test_missing_carry_pair_fails_closed_on_raw_or_identity_drift(self) -> None:
         identities = pl.DataFrame(
@@ -352,6 +366,19 @@ class S1EntryDayRunnerTest(unittest.TestCase):
         self.assertEqual(summary.makerfill_supported_orders, 1)
         self.assertEqual(summary.makerfill_eod_positive_orders, 0)
         self.assertEqual(summary.actual_active_entry_fills, 0)
+        self.assertGreater(summary.decision_economic_checks, 0)
+        self.assertEqual(summary.actual_send_economic_checks, 1)
+        self.assertEqual(summary.actual_send_economic_gate_open, 1)
+        self.assertEqual(summary.actual_send_economic_gate_closed, 0)
+        self.assertEqual(summary.actual_send_not_sent_after_gate_pass, 0)
+        self.assertEqual(len(run.economic_gate_audits), 1)
+        self.assertEqual(run.economic_gate_audits[0].dispatch_outcome, "sent")
+        self.assertEqual(
+            run.economic_gate_audits[0].raw_order_fact_id,
+            run.result.orders[0].raw_order_fact_id,
+        )
+        self.assertAlmostEqual(summary.makerfill_support_rate_of_sent or 0.0, 1.0)
+        self.assertAlmostEqual(summary.actual_active_fill_rate_of_sent or 0.0, 0.0)
         self.assertEqual(summary.spot_requests_sent, 2)
         self.assertFalse(summary.performance_available)
         self.assertEqual(
@@ -377,7 +404,9 @@ class S1EntryDayRunnerTest(unittest.TestCase):
         )
         self.assertEqual(run.result.positions[0].state, "exit_maker_flat")
         self.assertEqual(run.summary.entry_hedge_executions, 1)
-        self.assertEqual(run.summary.entry_hedge_success_rate, 1.0)
+        self.assertIsNotNone(run.summary.entry_hedge_success_rate)
+        assert run.summary.entry_hedge_success_rate is not None
+        self.assertAlmostEqual(run.summary.entry_hedge_success_rate, 1.0)
         self.assertEqual(run.summary.eod_paired_open_positions, 0)
         self.assertEqual(run.summary.paired_open_positions, 0)
         self.assertFalse(run.summary.performance_available)
@@ -434,7 +463,7 @@ class S1EntryDayRunnerTest(unittest.TestCase):
 
         self.assertEqual(run.result.expiry_mark_count, 1)
         self.assertEqual(len(run.result.expiry_marks), 1)
-        self.assertEqual(run.result.expiry_marks[0].spot_close_price, 101.5)
+        self.assertAlmostEqual(run.result.expiry_marks[0].spot_close_price, 101.5)
         self.assertEqual(
             run.result.positions[0].state,
             "expiry_basis_zero_accounting",
@@ -519,6 +548,50 @@ class S1EntryDayRunnerTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "cannot share"):
             list(run_s1_entry_policies(multi, capacity_ledger=CapacityLedger()))
+
+    def test_scenario_grid_is_default_and_cannot_mix_with_legacy_ids(self) -> None:
+        default_ids = signature(prepare_s1_entry_day).parameters[
+            "policy_ids"
+        ].default
+        self.assertEqual(default_ids, SCENARIO_IDS)
+        self.assertEqual(_validate_policy_ids(SCENARIO_IDS), SCENARIO_IDS)
+        self.assertEqual(_validate_policy_ids(POLICY_IDS), POLICY_IDS)
+        with self.assertRaisesRegex(ValueError, "cannot be mixed"):
+            _validate_policy_ids((POLICY_IDS[0], SCENARIO_IDS[0]))
+
+    def test_unsupported_scenario_spec_is_retained_as_explicit_no_trade(
+        self,
+    ) -> None:
+        scenario_id = "q95_C2_sd_f5"
+        table = build_s1_scenario_spec_table(
+            _mother(),
+            _entry_lookup(),
+            _convergence(),
+        ).filter(pl.col("scenario_id") == scenario_id)
+        specs_by_policy = _specs_by_policy(table, (scenario_id,))
+        specs = specs_by_policy[scenario_id]
+
+        self.assertEqual(len(specs), len(TOD_BUCKETS))
+        self.assertTrue(all(isinstance(spec, S1ScenarioSpec) for spec in specs))
+        first = next(
+            spec for spec in specs if spec.entry_tod_bucket == TOD_BUCKETS[0]
+        )
+        self.assertFalse(first.lookup_supported)
+        self.assertEqual(first.lookup_support_reason, "lower_unsupported")
+
+        legacy = _prepared()
+        prepared = replace(
+            legacy,
+            policy_ids=(scenario_id,),
+            specs_by_policy=MappingProxyType({scenario_id: specs}),
+            state_changes_by_policy=MappingProxyType(
+                {scenario_id: legacy.state_changes_by_policy["fixed20"]}
+            ),
+        )
+        run = run_s1_entry_policy(prepared, scenario_id)
+        self.assertEqual(run.summary.sent_entry_orders, 0)
+        self.assertEqual(run.result.orders, ())
+        self.assertEqual(run.result.spot_requests_sent, 0)
 
     def test_unprepared_policy_and_forward_window_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "not present"):

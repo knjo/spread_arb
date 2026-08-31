@@ -19,7 +19,7 @@ from .s1_entry_day_runner import S1EntryDayRun
 from .s1_event_loop import RiskEvent
 from .s1_hedge import HEDGE_DELAY_NS
 
-DIAGNOSTICS_SCHEMA_VERSION: Final = "s1_daily_diagnostics_v1"
+DIAGNOSTICS_SCHEMA_VERSION: Final = "s1_daily_diagnostics_v2_economic_gate"
 _UNRESOLVED_STATES: Final = frozenset(
     {
         "entry_hedge_timeout_unresolved",
@@ -33,6 +33,11 @@ _TOP_LEVEL_KEYS: Final = frozenset(
         "policy_id",
         "target_rank_counts",
         "makerfill_outcome_counts",
+        "economic_gate_decision_status_counts",
+        "economic_gate_actual_send_status_counts",
+        "economic_gate_dispatch_outcome_counts",
+        "economic_gate_sent_expected_margin_bp",
+        "economic_gate_sent_modeled_cost_twd",
         "candidate_terminal_counts",
         "order_terminal_counts",
         "admission_status_counts",
@@ -143,6 +148,27 @@ def build_s1_daily_diagnostics(
     physical_fill_reasons = Counter(
         fill.fill_reason for fill in result.exit_physical_fills
     )
+    decision_estimates = tuple(
+        value
+        for value in run.economic_gate_estimates
+        if value.evaluation_stage == "decision_observation"
+    )
+    actual_estimates = tuple(
+        value
+        for value in run.economic_gate_estimates
+        if value.evaluation_stage == "actual_send_refresh"
+    )
+    sent_audits = tuple(
+        value
+        for value in run.economic_gate_audits
+        if value.dispatch_outcome == "sent"
+    )
+    if len(actual_estimates) != len(run.economic_gate_audits):
+        raise S1DailyDiagnosticsError(
+            "actual-send economic estimate/audit counts differ"
+        )
+    if len(sent_audits) != len(result.orders):
+        raise S1DailyDiagnosticsError("sent economic audits differ from orders")
     record: dict[str, object] = {
         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "date": run.summary.date,
@@ -159,6 +185,34 @@ def build_s1_daily_diagnostics(
             Counter(
                 event.potential_outcome_status for event in run.makerfill_assessments
             )
+        ),
+        "economic_gate_decision_status_counts": _counter_record(
+            Counter(value.status for value in decision_estimates)
+        ),
+        "economic_gate_actual_send_status_counts": _counter_record(
+            Counter(value.status for value in actual_estimates)
+        ),
+        "economic_gate_dispatch_outcome_counts": _counter_record(
+            Counter(value.dispatch_outcome for value in run.economic_gate_audits)
+        ),
+        "economic_gate_sent_expected_margin_bp": sorted(
+            float(value.estimate.selected_expected_margin_bp)
+            for value in sent_audits
+            if value.estimate.selected_expected_margin_bp is not None
+        ),
+        "economic_gate_sent_modeled_cost_twd": sorted(
+            float(cost)
+            for value in sent_audits
+            if (
+                cost := (
+                    value.estimate.same_day_modeled_cost_twd
+                    if value.estimate.cost_horizon == "same_day"
+                    else value.estimate.overnight_modeled_cost_twd
+                    if value.estimate.cost_horizon == "overnight"
+                    else None
+                )
+            )
+            is not None
         ),
         "candidate_terminal_counts": _counter_record(
             Counter(event.status for event in result.candidate_intent_audit)
@@ -210,6 +264,9 @@ def validate_s1_daily_diagnostics(record: Mapping[str, object]) -> dict[str, obj
     for name in (
         "target_rank_counts",
         "makerfill_outcome_counts",
+        "economic_gate_decision_status_counts",
+        "economic_gate_actual_send_status_counts",
+        "economic_gate_dispatch_outcome_counts",
         "candidate_terminal_counts",
         "order_terminal_counts",
         "admission_status_counts",
@@ -219,6 +276,11 @@ def validate_s1_daily_diagnostics(record: Mapping[str, object]) -> dict[str, obj
         "exit_physical_fill_reason_counts",
     ):
         result[name] = _validated_counter(result[name], name)
+    for name in (
+        "economic_gate_sent_expected_margin_bp",
+        "economic_gate_sent_modeled_cost_twd",
+    ):
+        result[name] = _float_samples(result[name], name)
     for name in (
         "active_fill_count",
         "exit_physical_fill_count",

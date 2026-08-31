@@ -1,18 +1,29 @@
-# Work Package 03：固定 50 ms Hedge 與成本
+# Work Package 03：50 ms 首次判定、B6 Retry 與成本
 
 Entry 兩條 route 的八日 raw pilot 見
-[quote_fill/PILOT_RESULTS.md](quote_fill/PILOT_RESULTS.md)。目前只完成 entry
-fill 後的 hedge；exit maker／hedge 與 pathwise EV 尚未完成。
+[quote_fill/PILOT_RESULTS.md](quote_fill/PILOT_RESULTS.md)。Cost-aware S1 已實作 Spot Bid entry hedge，以及第一條
+exact pooled `Spot Ask maker → Future buy taker` normal-exit hedge；正式 71 日 replay、第二條 Future Bid exit route與
+S3 route comparison 尚未完成。
 
 ## 時間定義
 
 ```text
-t_hedge = maker_fill_receive_time + 50 ms
+t0 = hedge_trigger_cursor + 50 ms
+deadline = min(t0 + 5 s, hedge venue session end)
 ```
 
-`maker_fill_receive_time` 由 raw fill event `RecvTime` 重建，是 private fill notification 的公開資料代理；後續以 shadow／真實委託校準。
+`hedge_trigger_cursor` 依 route 定義：Spot Bid S1 entry 使用 legacy makerFill implied cursor，因此仍是 mixed-clock
+approximation；exact pooled exit 使用累積到一個 futures-equivalent unit 的 physical fill cursor。後續仍需以 shadow／真實
+委託校準。
 
-在 `t_hedge` 處理完所有已收到行情後，取反向市場最後有效 L1–L5，依 maker 實際成交量計算 taker VWAP。不得用 50 ms 後才收到的最佳價，也不得把超過 L5 的殘量假設成交在 A1／B1。
+在 `t0` 處理完所有已收到行情後，獨立檢查反向市場最後有效 L1–L5及該 venue 送單額度。若合法足量且可送，
+actual request send與定價就在 `t0`；否則沿完整 raw-state change與 rolling scheduler往後找第一個同時合法足量且可送的
+cursor，最長 5 秒。只有真正送出才消耗 request，價格取 actual-send cursor 的 executable VWAP；deadline inclusive
+dispatch後仍失敗就原子式 timeout並走共同 emergency rollback。不得把等待期間看見的最佳價 hindsight搬回 `t0`，也不得
+把超過 L5 的殘量假設成交在 A1／B1。
+
+每筆另存 `t0` book status、actual send／book cursor、retry delay、on-time／delayed／timeout、arrival reference
+coverage、slippage與rollback outcome；null reference／slippage不得補 0。
 
 ## 四條路徑
 
@@ -27,10 +38,10 @@ t_hedge = maker_fill_receive_time + 50 ms
 
 ```text
 selection_plus_latency
-= hedge_vwap_50ms - opposite_price_at_quote_submit
+= hedge_vwap_actual_send - opposite_price_at_quote_submit
 
 latency_plus_depth
-= hedge_vwap_50ms - opposite_price_at_maker_fill
+= hedge_vwap_actual_send - opposite_price_at_hedge_trigger
 ```
 
 賣出 taker 的符號反向，使正值統一代表成本。

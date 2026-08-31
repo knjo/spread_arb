@@ -67,6 +67,7 @@ from ..quote_fill.s1_spot_trade_adapter import (
     PhysicalSpotTrade,
     physical_spot_trade_source_id,
 )
+from ..quote_fill.targets import absolute_price_tick
 
 DATE = "20260505"
 NEXT_DATE = "20260506"
@@ -405,6 +406,7 @@ def observation(
     admission: bool = True,
     snapshot: int = 1,
     lower_bp: float = 12.5,
+    exit_price: float = 101.0,
 ) -> EntryObservation:
     return EntryObservation(
         EventCursor(time_ns, 10, row),
@@ -425,6 +427,12 @@ def observation(
             10,
         ),
         lower_bp,
+        frozen_exit_target_price=exit_price,
+        frozen_exit_absolute_price_tick=absolute_price_tick(
+            exit_price,
+            market="spot",
+            session_date=DATE,
+        ),
     )
 
 
@@ -519,6 +527,44 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertEqual(encode_s1_carry_position(decoded), record)
         self.assertIsInstance(decoded, S1CarryPosition)
 
+    def test_frozen_exit_price_tick_consistency_is_enforced_at_boundaries(
+        self,
+    ) -> None:
+        day_one, _ = self._day_one_carry()
+        order = day_one.orders[0]
+        self.assertIsNotNone(order.frozen_exit_absolute_price_tick)
+        assert order.frozen_exit_absolute_price_tick is not None
+        with self.assertRaisesRegex(ValueError, "sent-order.*price/tick mismatch"):
+            replace(
+                order,
+                frozen_exit_absolute_price_tick=(
+                    order.frozen_exit_absolute_price_tick + 1
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "legal spot ladder"):
+            replace(order, frozen_exit_target_price=100.1)
+
+        carry = day_one.carry_out[0]
+        with self.assertRaisesRegex(ValueError, "carry.*price/tick mismatch"):
+            replace(
+                carry,
+                frozen_exit_absolute_price_tick=(
+                    carry.frozen_exit_absolute_price_tick + 1
+                ),
+            )
+
+        mismatched_tick = encode_s1_carry_position(carry)
+        mismatched_tick["frozen_exit_absolute_price_tick"] = (
+            carry.frozen_exit_absolute_price_tick + 1
+        )
+        with self.assertRaisesRegex(S1CarryCodecError, "price/tick mismatch"):
+            decode_s1_carry_position(mismatched_tick)
+
+        off_ladder_price = encode_s1_carry_position(carry)
+        off_ladder_price["frozen_exit_target_price"] = 100.1
+        with self.assertRaisesRegex(S1CarryCodecError, "legal spot ladder"):
+            decode_s1_carry_position(off_ladder_price)
+
     def test_carry_position_json_codec_rejects_schema_type_and_fact_tamper(
         self,
     ) -> None:
@@ -541,6 +587,10 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             ("schema_version", True),
             ("frozen_exit_threshold_basis_bp", 1),
             ("frozen_exit_threshold_basis_bp", float("nan")),
+            ("frozen_exit_target_price", 1),
+            ("frozen_exit_target_price", float("nan")),
+            ("frozen_exit_absolute_price_tick", 1.0),
+            ("frozen_exit_absolute_price_tick", 0),
             ("execution_truth", "approx"),
         ):
             malformed = dict(original)
@@ -578,6 +628,8 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
 
         with self.assertRaises(S1CarryCodecError):
             encode_s1_carry_position(replace(carry, frozen_exit_threshold_basis_bp=1))
+        with self.assertRaisesRegex(ValueError, "price/tick mismatch"):
+            replace(carry, frozen_exit_target_price=1)
 
     def test_carry_contract_binding_json_codec_is_strict_and_exact(self) -> None:
         binding = S1CarryContractBinding.from_product(product(P1, end_date="20260529"))
@@ -822,6 +874,65 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertEqual(result.admission_events, ())
         self.assertEqual(result.capacity_transitions, ())
         self.assertEqual(result.spot_requests_sent, 0)
+
+    def test_economic_gate_reopens_on_book_change_without_pending_new(self) -> None:
+        blocked = replace(
+            observation(P1, 100, admission=False),
+            gate_reason="economic_gate:expected_margin_not_above_floor",
+        )
+        reopened = observation(P1, 150, snapshot=3)
+        state = TimelineStateAdapter({P1: (blocked, reopened)})
+        future_change = book("future", P1, 150, packet=44)
+        books = QueryRiskBooks({("future", P1): (future_change.event,)})
+        loop = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=state,
+            risk_book_adapter=books,
+        )
+
+        result = loop.run((blocked, SessionExpiry(EventCursor(300, 30, 0))))
+
+        self.assertEqual(len(result.orders), 1)
+        self.assertEqual(result.orders[0].actual_start_cursor.recv_time_ns, 150)
+        self.assertEqual(result.spot_requests_sent, 1)
+        self.assertTrue(
+            any(
+                venue == "future" and after.recv_time_ns == 100
+                for venue, _, after, _ in books.next_calls
+            )
+        )
+
+    def test_missing_future_ask_reopens_on_future_book_recovery(self) -> None:
+        blocked = replace(
+            observation(P1, 100, gate=False, admission=False),
+            gate_reason="empty_future_book",
+            base_gate_book_wake_venues=frozenset(("future",)),
+        )
+        reopened = observation(P1, 150, snapshot=3)
+        state = TimelineStateAdapter({P1: (blocked, reopened)})
+        future_recovery = book("future", P1, 150, packet=45)
+        books = QueryRiskBooks({("future", P1): (future_recovery.event,)})
+        loop = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=state,
+            risk_book_adapter=books,
+        )
+
+        result = loop.run((blocked, SessionExpiry(EventCursor(300, 30, 0))))
+
+        self.assertEqual(len(result.orders), 1)
+        self.assertEqual(result.orders[0].actual_start_cursor.recv_time_ns, 150)
+        self.assertEqual(result.spot_requests_sent, 1)
+        self.assertEqual(
+            [
+                venue
+                for venue, _, after, _ in books.next_calls
+                if after.recv_time_ns == 100
+            ],
+            ["future"],
+        )
 
     def test_delayed_new_refetches_current_state_and_cannot_fill_at_start(self) -> None:
         first = observation(P1, 100, snapshot=11)
@@ -1446,7 +1557,7 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertTrue(specialized.exit_quote_calls)
         self.assertEqual(
             {call[0] for call in specialized.exit_quote_calls},
-            {"spot", "future"},
+            {"spot"},
         )
         self.assertTrue(
             any(
@@ -2393,7 +2504,7 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             len(legacy_trades.price_aware_calls),
         )
 
-    def test_exit_existing_fill_precedes_assigned_cancel(self) -> None:
+    def test_frozen_exit_price_does_not_cancel_when_future_ask_moves(self) -> None:
         opened = observation(P1, 100)
         entry_fill_time = 200
         entry_hedge_time = entry_fill_time + HEDGE_DELAY_NS
@@ -2423,15 +2534,14 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             )
         )
 
-        cancel = next(
+        cancels = [
             event
             for event in result.request_events
             if event.stage == "exit"
             and event.request_class == "cancel"
             and event.event_type == "actual_send"
-        )
-        self.assertEqual(cancel.event_cursor.event_sequence, 500)
-        self.assertEqual(cancel.effect_status, "exit_cancel_noop_after_fill")
+        ]
+        self.assertEqual(cancels, [])
         exit_fill = next(
             fact for fact in result.executions if fact.role == "exit_maker"
         )
@@ -2683,6 +2793,7 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             tick=1_001,
             snapshot=2,
             lower_bp=100.0,
+            exit_price=102.0,
         )
         loop = S1EventLoop(
             config(),

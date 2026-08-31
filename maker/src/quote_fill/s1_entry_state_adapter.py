@@ -12,8 +12,15 @@ import polars as pl
 
 from .layered import EventCursor
 from .policy_spec import TOD_BUCKETS, PolicySpec
-from .s1_event_loop import ActualSendMakerSnapshot, EntryObservation
+from .s1_economic_gate import (
+    UNGATED_CONTROL_RULE,
+    S1EconomicGateEstimate,
+    S1EconomicGateRule,
+    evaluate_s1_entry_economics,
+)
+from .s1_event_loop import PHASE_ASSIGN, ActualSendMakerSnapshot, EntryObservation
 from .s1_hedge import CausalBookState, executable_book
+from .s1_scenario_spec import S1ScenarioSpec
 from .s1_target import S1_ROUTE, actual_send_tod_bucket, build_s1_spot_bid_target
 from .targets import price_in_ref_band
 
@@ -189,7 +196,7 @@ class S1EntryStateAdapter:
     def __init__(
         self,
         common_day: pl.DataFrame,
-        specs: Sequence[PolicySpec],
+        specs: Sequence[PolicySpec | S1ScenarioSpec],
         *,
         date: str,
         policy_id: str,
@@ -220,9 +227,14 @@ class S1EntryStateAdapter:
         if len(self._identity) != len(self._decisions.spans):
             raise ValueError("ValueCode to QuoteCode mapping is not one-to-one")
         values = tuple(specs)
-        if not values or any(not isinstance(spec, PolicySpec) for spec in values):
-            raise TypeError("specs must contain PolicySpec values")
-        self._specs: dict[tuple[str, str], PolicySpec] = {}
+        if not values or any(
+            not isinstance(spec, (PolicySpec, S1ScenarioSpec)) for spec in values
+        ):
+            raise TypeError("specs must contain PolicySpec or S1ScenarioSpec values")
+        self._specs: dict[
+            tuple[str, str], PolicySpec | S1ScenarioSpec
+        ] = {}
+        self._economic_estimates: list[S1EconomicGateEstimate] = []
         for spec in values:
             if spec.Date != date or spec.policy_id != policy_id:
                 raise ValueError("PolicySpec date/policy does not match adapter")
@@ -247,6 +259,10 @@ class S1EntryStateAdapter:
     @property
     def decision_lookup_counts(self) -> Mapping[str, int]:
         return self._decisions.lookup_counts
+
+    @property
+    def economic_gate_estimates(self) -> tuple[S1EconomicGateEstimate, ...]:
+        return tuple(self._economic_estimates)
 
     def current_state(
         self,
@@ -274,6 +290,20 @@ class S1EntryStateAdapter:
         except ValueError:
             return None
         spec = self._specs[(product_id, tod_bucket)]
+        if isinstance(spec, S1ScenarioSpec) and not spec.lookup_supported:
+            return EntryObservation(
+                assignment_cursor,
+                product_id,
+                None,
+                None,
+                None,
+                False,
+                False,
+                "lookup_unsupported:" + spec.lookup_support_reason,
+                None,
+                None,
+                None,
+            )
         snapshot = self.book_provider.maker_snapshot_as_of(
             product_id,
             assignment_cursor,
@@ -290,7 +320,7 @@ class S1EntryStateAdapter:
             product_id,
             assignment_cursor,
         )
-        gate_reason = _base_gate_reason(
+        gate_reason, base_gate_book_wake_venues = _base_gate_reason(
             bool(analysis_eligible),
             anchor_basis_bp,
             contract_size,
@@ -310,6 +340,7 @@ class S1EntryStateAdapter:
                 gate_reason,
                 snapshot,
                 None,
+                base_gate_book_wake_venues=base_gate_book_wake_venues,
             )
         assert spot is not None and future is not None
         future_exec, future_reason = executable_book(
@@ -331,6 +362,28 @@ class S1EntryStateAdapter:
                 future_reason or "future_entry_book_closed",
                 snapshot,
                 None,
+                base_gate_book_wake_venues=frozenset(("future",)),
+            )
+        future_exit_exec, future_exit_reason = executable_book(
+            future,
+            side="buy",
+            quantity=1,
+            quantity_unit="future_contracts",
+            send_eligible_cursor=assignment_cursor,
+        )
+        if future_exit_exec is None:
+            return EntryObservation(
+                assignment_cursor,
+                product_id,
+                None,
+                None,
+                None,
+                False,
+                False,
+                future_exit_reason or "future_exit_proxy_book_closed",
+                snapshot,
+                None,
+                base_gate_book_wake_venues=frozenset(("future",)),
             )
         target = build_s1_spot_bid_target(
             spec,
@@ -341,6 +394,7 @@ class S1EntryStateAdapter:
             actual_new_send_cursor=assignment_cursor,
             causal_anchor_basis_bp=float(anchor_basis_bp),
             fut_exec_bid=future_exec.executable_vwap,
+            fut_exec_ask=future_exit_exec.executable_vwap,
             spot_bid=spot.bids[0].price,
             spot_ask=spot.asks[0].price,
             contract_size_shares=float(contract_size),
@@ -368,19 +422,51 @@ class S1EntryStateAdapter:
                 reason,
                 snapshot,
                 target.frozen_exit_threshold_basis_bp,
+                frozen_exit_target_price=target.frozen_exit_target_price,
+                frozen_exit_absolute_price_tick=(
+                    target.frozen_exit_absolute_price_tick
+                ),
             )
-        admission = _ab12_exact(target.target_price, snapshot, spot)
+        economics = evaluate_s1_entry_economics(
+            target,
+            observation_cursor=assignment_cursor,
+            spot_reference_price=float(reference),
+            rule=_economic_rule(spec),
+            evaluation_stage=(
+                "actual_send_refresh"
+                if assignment_cursor.event_sequence == PHASE_ASSIGN
+                else "decision_observation"
+            ),
+        )
+        self._economic_estimates.append(economics)
+        ab12 = _ab12_exact(target.target_price, snapshot, spot)
+        admission = ab12 and economics.gate_open
+        if not economics.gate_open:
+            reason = "economic_gate:" + economics.reason
+        elif not ab12:
+            reason = "target_not_exact_raw_bid1_bid2"
+        else:
+            reason = "eligible"
         return EntryObservation(
-            assignment_cursor,
-            product_id,
-            target.absolute_price_tick,
-            target.target_price,
-            target.reservation_notional_twd if admission else None,
-            True,
-            admission,
-            "eligible" if admission else "target_not_exact_raw_bid1_bid2",
-            snapshot,
-            target.frozen_exit_threshold_basis_bp,
+            source_cursor=assignment_cursor,
+            product_id=product_id,
+            absolute_price_tick=target.absolute_price_tick,
+            target_price=target.target_price,
+            reservation_notional_twd=(
+                target.reservation_notional_twd if admission else None
+            ),
+            base_gate_open=True,
+            admission_open=admission,
+            gate_reason=reason,
+            maker_snapshot=snapshot,
+            frozen_exit_threshold_basis_bp=(
+                target.frozen_exit_threshold_basis_bp
+            ),
+            economic_estimate=economics,
+            frozen_exit_target_price=target.frozen_exit_target_price,
+            frozen_exit_absolute_price_tick=(
+                target.frozen_exit_absolute_price_tick
+            ),
         )
 
     def iter_observations(
@@ -417,6 +503,19 @@ class S1EntryStateAdapter:
                 yield state
 
 
+def _economic_rule(
+    spec: PolicySpec | S1ScenarioSpec,
+) -> S1EconomicGateRule:
+    if isinstance(spec, PolicySpec):
+        return UNGATED_CONTROL_RULE
+    return S1EconomicGateRule(
+        cost_horizon=spec.cost_horizon,
+        safety_floor_bp=spec.safety_floor_bp,
+        economic_gate_enabled=spec.economic_gate_enabled,
+        deployment_shortlist_eligible=spec.deployment_shortlist_eligible,
+    )
+
+
 def merge_entry_events(
     observations: Iterable[EntryObservation],
     other_events: Iterable[object],
@@ -446,33 +545,39 @@ def _base_gate_reason(
     spot: CausalBookState | None,
     future: CausalBookState | None,
     cursor: EventCursor,
-) -> str | None:
+) -> tuple[str | None, frozenset[Venue]]:
     if not analysis_eligible:
-        return "analysis_ineligible"
+        return "analysis_ineligible", frozenset()
     if not _finite(anchor_basis_bp):
-        return "invalid_anchor"
+        return "invalid_anchor", frozenset()
     if not _positive_integral(contract_size):
-        return "invalid_contract_size"
+        return "invalid_contract_size", frozenset()
     for venue, state in (("spot", spot), ("future", future)):
         if state is None:
-            return f"missing_{venue}_book"
+            return f"missing_{venue}_book", frozenset((venue,))
         if state.book_cursor.cursor > cursor:
             raise ValueError(f"{venue} book cannot follow the assignment cursor")
         if not state.gate_open:
-            return state.gate_reason or f"{venue}_gate_closed"
+            return (
+                state.gate_reason or f"{venue}_gate_closed",
+                frozenset((venue,)),
+            )
         reference = state.reference_price
         if not _finite_positive(reference):
-            return f"invalid_{venue}_reference"
+            return f"invalid_{venue}_reference", frozenset((venue,))
         if not state.bids or not state.asks:
-            return f"empty_{venue}_book"
+            return f"empty_{venue}_book", frozenset((venue,))
         if state.bids[0].price > state.asks[0].price:
-            return f"crossed_{venue}_book"
+            return f"crossed_{venue}_book", frozenset((venue,))
         if not (
             price_in_ref_band(state.bids[0].price, float(reference))
             and price_in_ref_band(state.asks[0].price, float(reference))
         ):
-            return f"{venue}_bbo_outside_reference_band"
-    return None
+            return (
+                f"{venue}_bbo_outside_reference_band",
+                frozenset((venue,)),
+            )
+    return None, frozenset()
 
 
 def _ab12_exact(

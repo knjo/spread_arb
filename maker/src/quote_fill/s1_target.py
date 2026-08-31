@@ -6,12 +6,13 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from functools import lru_cache
+from functools import cache
 from typing import Final, Literal
 from zoneinfo import ZoneInfo
 
 from .layered import EventCursor
 from .policy_spec import TOD_BUCKETS, PolicySpec
+from .s1_scenario_spec import S1ScenarioSpec
 from .targets import (
     ROUTE_SPECS,
     absolute_price_tick,
@@ -21,6 +22,7 @@ from .targets import (
 )
 
 S1_ROUTE: Final = "spot_bid_future_taker"
+S1_EXIT_ROUTE: Final = "spot_ask_future_taker"
 SESSION_TIMEZONE: Final = ZoneInfo("Asia/Taipei")
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
 PRICE_EPSILON: Final = 1e-8
@@ -60,11 +62,15 @@ class S1SpotBidTarget:
     entry_threshold_basis_bp: float
     frozen_exit_threshold_basis_bp: float
     fut_exec_bid_at_actual_new: float
+    fut_exec_ask_at_actual_new: float
     spot_bid_at_actual_new: float
     spot_ask_at_actual_new: float
     target_price: float
     absolute_price_tick: int
     effective_entry_basis_bp: float
+    frozen_exit_target_price: float
+    frozen_exit_absolute_price_tick: int
+    effective_exit_basis_bp_at_actual_new: float
     passive_target: bool
     target_location: TargetLocation
     contract_size_shares: int
@@ -95,7 +101,7 @@ def actual_send_tod_bucket(date: str, cursor: EventCursor) -> tuple[int, str]:
 
 
 def build_s1_spot_bid_target(
-    spec: PolicySpec,
+    spec: PolicySpec | S1ScenarioSpec,
     *,
     date: str,
     value_code: str,
@@ -104,6 +110,7 @@ def build_s1_spot_bid_target(
     actual_new_send_cursor: EventCursor,
     causal_anchor_basis_bp: float,
     fut_exec_bid: float,
+    fut_exec_ask: float,
     spot_bid: float,
     spot_ask: float,
     contract_size_shares: float,
@@ -115,8 +122,10 @@ def build_s1_spot_bid_target(
     order lifecycle.
     """
 
-    if not isinstance(spec, PolicySpec):
-        raise TypeError("spec must be a PolicySpec")
+    if not isinstance(spec, (PolicySpec, S1ScenarioSpec)):
+        raise TypeError("spec must be a PolicySpec or S1ScenarioSpec")
+    if isinstance(spec, S1ScenarioSpec) and not spec.lookup_supported:
+        raise ValueError("unsupported S1 scenario lookup cannot build a target")
     _validate_identity(
         spec,
         date=date,
@@ -130,6 +139,9 @@ def build_s1_spot_bid_target(
 
     anchor = _finite(causal_anchor_basis_bp, "causal_anchor_basis_bp")
     future_bid = _positive(fut_exec_bid, "fut_exec_bid")
+    future_ask = _positive(fut_exec_ask, "fut_exec_ask")
+    if future_bid > future_ask:
+        raise ValueError("future executable bid cannot exceed executable ask")
     current_spot_bid = _positive(spot_bid, "spot_bid")
     current_spot_ask = _positive(spot_ask, "spot_ask")
     if current_spot_bid > current_spot_ask:
@@ -164,6 +176,22 @@ def build_s1_spot_bid_target(
         S1_ROUTE,
         target_price,
         fut_exec_bid=future_bid,
+    )
+    frozen_exit_target = target_price_for_basis(
+        S1_EXIT_ROUTE,
+        frozen_exit_threshold,
+        session_date=date,
+        fut_exec_ask=future_ask,
+    )
+    frozen_exit_tick = absolute_price_tick(
+        frozen_exit_target,
+        market="spot",
+        session_date=date,
+    )
+    effective_exit_basis = effective_basis_bp(
+        S1_EXIT_ROUTE,
+        frozen_exit_target,
+        fut_exec_ask=future_ask,
     )
     passive = is_passive_target(
         S1_ROUTE,
@@ -208,11 +236,15 @@ def build_s1_spot_bid_target(
         entry_threshold_basis_bp=entry_threshold,
         frozen_exit_threshold_basis_bp=frozen_exit_threshold,
         fut_exec_bid_at_actual_new=future_bid,
+        fut_exec_ask_at_actual_new=future_ask,
         spot_bid_at_actual_new=current_spot_bid,
         spot_ask_at_actual_new=current_spot_ask,
         target_price=target_price,
         absolute_price_tick=target_tick,
         effective_entry_basis_bp=effective_basis,
+        frozen_exit_target_price=frozen_exit_target,
+        frozen_exit_absolute_price_tick=frozen_exit_tick,
+        effective_exit_basis_bp_at_actual_new=effective_exit_basis,
         passive_target=passive,
         target_location=target_location,
         contract_size_shares=contract_size,
@@ -230,7 +262,7 @@ def build_s1_spot_bid_target(
 
 
 def _validate_identity(
-    spec: PolicySpec,
+    spec: PolicySpec | S1ScenarioSpec,
     *,
     date: str,
     value_code: str,
@@ -255,7 +287,7 @@ def _validate_identity(
         raise ValueError("Date/product identity does not match PolicySpec")
 
 
-@lru_cache(maxsize=None)
+@cache
 def _validate_date(value: str) -> None:
     if not isinstance(value, str) or not re.fullmatch(r"\d{8}", value):
         raise ValueError("date must be YYYYMMDD")
@@ -265,7 +297,7 @@ def _validate_date(value: str) -> None:
         raise ValueError("date must be a valid YYYYMMDD date") from error
 
 
-@lru_cache(maxsize=None)
+@cache
 def _local_time_ns(date: str, *, hour: int, minute: int) -> int:
     value = datetime.strptime(date, "%Y%m%d").replace(
         hour=hour,

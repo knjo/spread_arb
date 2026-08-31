@@ -76,6 +76,7 @@ def _build(spec: PolicySpec, cursor: EventCursor, **overrides: object):
         "actual_new_send_cursor": cursor,
         "causal_anchor_basis_bp": 10.0,
         "fut_exec_bid": 101.0,
+        "fut_exec_ask": 101.1,
         "spot_bid": 100.0,
         "spot_ask": 100.8,
         "contract_size_shares": 1000.0,
@@ -103,10 +104,17 @@ class S1TargetTest(unittest.TestCase):
             )
         )
         self.assertEqual(target.lower_source_id, "C0_center")
+        self.assertEqual(target.lower_source_asof_date, "20260504")
         self.assertEqual(
             target.absolute_price_tick,
             absolute_price_tick(target.target_price),
         )
+        self.assertEqual(target.fut_exec_ask_at_actual_new, 101.1)
+        self.assertEqual(
+            target.frozen_exit_absolute_price_tick,
+            absolute_price_tick(target.frozen_exit_target_price),
+        )
+        self.assertLessEqual(target.effective_exit_basis_bp_at_actual_new, 10.0)
         self.assertGreaterEqual(target.effective_entry_basis_bp, 40.0)
         self.assertEqual(
             target.reservation_notional_twd,
@@ -172,6 +180,7 @@ class S1TargetTest(unittest.TestCase):
         for name, value in (
             ("causal_anchor_basis_bp", math.nan),
             ("fut_exec_bid", 0.0),
+            ("fut_exec_ask", 0.0),
             ("spot_bid", 0.0),
             ("spot_ask", -1.0),
             ("contract_size_shares", math.inf),
@@ -214,6 +223,28 @@ class S1TargetTest(unittest.TestCase):
                 spot_bid=101.0,
                 spot_ask=100.0,
             )
+        with self.assertRaisesRegex(ValueError, "executable bid cannot exceed"):
+            _build(
+                _q_spec(),
+                _cursor(300),
+                fut_exec_bid=101.0,
+                fut_exec_ask=100.9,
+            )
+
+    def test_entry_freezes_absolute_exit_from_actual_send_future_ask(self) -> None:
+        original = _build(_q_spec(), _cursor(300), fut_exec_ask=101.1)
+        later_reprice = _build(_q_spec(), _cursor(300), fut_exec_ask=102.1)
+
+        self.assertEqual(original.frozen_exit_target_price, 101.0)
+        self.assertEqual(
+            original.frozen_exit_absolute_price_tick,
+            absolute_price_tick(101.0),
+        )
+        self.assertNotEqual(
+            original.frozen_exit_target_price,
+            later_reprice.frozen_exit_target_price,
+        )
+        self.assertEqual(original.target_price, later_reprice.target_price)
 
 
 if __name__ == "__main__":

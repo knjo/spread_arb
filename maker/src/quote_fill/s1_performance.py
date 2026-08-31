@@ -231,9 +231,20 @@ class S1ScenarioPerformance:
     open_or_unresolved: int
     terminal_coverage_numerator: int
     terminal_coverage_denominator: int
+    executable_terminal_gross_pnl_twd: Decimal
+    expiry_mark_gross_pnl_twd: Decimal
+    terminal_gross_pnl_twd: Decimal
+    executable_terminal_commission_twd: Decimal
+    executable_terminal_tax_twd: Decimal
+    expiry_mark_commission_twd: Decimal
+    expiry_mark_tax_twd: Decimal
+    terminal_modeled_direct_cost_twd: Decimal
     executable_terminal_net_twd: Decimal
     expiry_mark_net_twd: Decimal
     total_net_twd: Decimal
+    terminal_executed_turnover_twd: Decimal
+    open_executed_turnover_twd: Decimal
+    total_executed_turnover_twd: Decimal
     open_execution_actual_commission_twd: Decimal
     open_execution_actual_tax_twd: Decimal
     open_execution_actual_cost_twd: Decimal
@@ -290,6 +301,15 @@ class S1ScenarioPerformance:
     @property
     def mean_daily_net_twd(self) -> Decimal:
         return _ratio(self.total_net_twd, self.reporting_sessions)
+
+    @property
+    def terminal_net_bp_of_turnover(self) -> Decimal | None:
+        if self.terminal_executed_turnover_twd == 0:
+            return None
+        return _ratio(
+            self.total_net_twd * Decimal(10_000),
+            self.terminal_executed_turnover_twd,
+        )
 
     def to_scenario_metrics(self) -> ScenarioMetrics:
         """Return the sufficient statistics consumed by ``s1_ranking``."""
@@ -468,6 +488,47 @@ def aggregate_s1_scenario_metrics(
         for outcome in outcomes
         if isinstance(outcome.terminal, ExpiryAccountingMark)
     )
+    executable_terminals = tuple(
+        outcome.terminal
+        for outcome in outcomes
+        if isinstance(outcome.terminal, TerminalRealizedAccounting)
+    )
+    expiry_terminals = tuple(
+        outcome.terminal
+        for outcome in outcomes
+        if isinstance(outcome.terminal, ExpiryAccountingMark)
+    )
+    executable_gross = _decimal_sum(
+        terminal.spot_cashflow_twd + terminal.futures_realized_pnl_twd
+        for terminal in executable_terminals
+    )
+    expiry_gross = _decimal_sum(
+        terminal.spot_cashflow_twd + terminal.futures_realized_pnl_twd
+        for terminal in expiry_terminals
+    )
+    executable_commission = _decimal_sum(
+        terminal.commission_twd for terminal in executable_terminals
+    )
+    executable_tax = _decimal_sum(
+        terminal.tax_twd for terminal in executable_terminals
+    )
+    expiry_commission = _decimal_sum(
+        terminal.actual_commission_twd + terminal.synthetic_commission_twd
+        for terminal in expiry_terminals
+    )
+    expiry_tax = _decimal_sum(
+        terminal.actual_tax_twd + terminal.synthetic_tax_twd
+        for terminal in expiry_terminals
+    )
+    terminal_cost = (
+        executable_commission
+        + executable_tax
+        + expiry_commission
+        + expiry_tax
+    )
+    terminal_gross = executable_gross + expiry_gross
+    if abs((terminal_gross - terminal_cost) - (executable_terminal_net + expiry_net)) > Decimal("0.000001"):
+        raise S1PerformanceError("terminal gross-cost-net decomposition drifted")
 
     open_position_ids = {
         position_id for position_id in entries if position_id not in terminals
@@ -476,6 +537,14 @@ def aggregate_s1_scenario_metrics(
     open_commission = _decimal_sum(row.commission_twd for row in open_rows)
     open_tax = _decimal_sum(row.tax_twd for row in open_rows)
     open_cost = _decimal_sum(row.total_cost_twd for row in open_rows)
+    terminal_position_ids = set(terminals)
+    terminal_execution_rows = tuple(
+        row for row in executions if row.position_id in terminal_position_ids
+    )
+    terminal_turnover = _decimal_sum(
+        _execution_turnover_twd(row) for row in terminal_execution_rows
+    )
+    open_turnover = _decimal_sum(_execution_turnover_twd(row) for row in open_rows)
 
     hedge_success = len(establishments)
     if summaries is None:
@@ -521,9 +590,20 @@ def aggregate_s1_scenario_metrics(
         open_or_unresolved=category_counts["open"],
         terminal_coverage_numerator=terminal_count,
         terminal_coverage_denominator=entry_count,
+        executable_terminal_gross_pnl_twd=executable_gross,
+        expiry_mark_gross_pnl_twd=expiry_gross,
+        terminal_gross_pnl_twd=terminal_gross,
+        executable_terminal_commission_twd=executable_commission,
+        executable_terminal_tax_twd=executable_tax,
+        expiry_mark_commission_twd=expiry_commission,
+        expiry_mark_tax_twd=expiry_tax,
+        terminal_modeled_direct_cost_twd=terminal_cost,
         executable_terminal_net_twd=executable_terminal_net,
         expiry_mark_net_twd=expiry_net,
         total_net_twd=executable_terminal_net + expiry_net,
+        terminal_executed_turnover_twd=terminal_turnover,
+        open_executed_turnover_twd=open_turnover,
+        total_executed_turnover_twd=terminal_turnover + open_turnover,
         open_execution_actual_commission_twd=open_commission,
         open_execution_actual_tax_twd=open_tax,
         open_execution_actual_cost_twd=open_cost,
@@ -534,6 +614,13 @@ def aggregate_s1_scenario_metrics(
         daily_net=daily,
         monthly_net=monthly,
     )
+
+
+def _execution_turnover_twd(row: ExecutedLeg) -> Decimal:
+    units = row.shares if row.market == "spot" else row.share_equivalent
+    if units <= 0:
+        raise S1PerformanceError("executed leg has non-positive turnover units")
+    return _money(row.price) * Decimal(units)
 
 
 def _position_category(

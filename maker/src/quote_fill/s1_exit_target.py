@@ -13,7 +13,6 @@ from .targets import (
     effective_basis_bp,
     is_passive_target,
     price_in_ref_band,
-    target_price_for_basis,
 )
 
 ROUTE = "spot_ask_future_taker"
@@ -37,9 +36,11 @@ class S1SpotAskTarget:
     scenario_id: str
     observation_cursor: EventCursor
     frozen_exit_threshold_basis_bp: float
+    frozen_exit_target_price: float
+    frozen_exit_absolute_price_tick: int
     future_buy_vwap: float | None
-    target_price: float | None
-    absolute_price_tick: int | None
+    target_price: float
+    absolute_price_tick: int
     effective_exit_basis_bp: float | None
     passive_target: bool
     target_in_reference_band: bool
@@ -61,11 +62,13 @@ def build_s1_spot_ask_target(
     scenario_id: str,
     observation_cursor: EventCursor,
     frozen_exit_threshold_basis_bp: float,
+    frozen_exit_target_price: float,
+    frozen_exit_absolute_price_tick: int,
     spot_book: CausalBookState | None,
     future_book: CausalBookState | None,
     future_contracts: int = 1,
 ) -> S1SpotAskTarget:
-    """Recompute the legal maker ask from the position's frozen basis lower."""
+    """Observe one exit without moving the position's frozen absolute ask."""
 
     for name, value in (
         ("date", date),
@@ -84,6 +87,23 @@ def build_s1_spot_ask_target(
         frozen_exit_threshold_basis_bp,
         "frozen_exit_threshold_basis_bp",
     )
+    frozen_target = _positive(
+        frozen_exit_target_price,
+        "frozen_exit_target_price",
+    )
+    if (
+        isinstance(frozen_exit_absolute_price_tick, bool)
+        or not isinstance(frozen_exit_absolute_price_tick, int)
+        or frozen_exit_absolute_price_tick < 0
+    ):
+        raise ValueError("frozen_exit_absolute_price_tick must be non-negative")
+    derived_tick = absolute_price_tick(
+        frozen_target,
+        market="spot",
+        session_date=date,
+    )
+    if derived_tick != frozen_exit_absolute_price_tick:
+        raise ValueError("frozen exit target price/tick mismatch")
     if (
         isinstance(future_contracts, bool)
         or not isinstance(future_contracts, int)
@@ -92,14 +112,11 @@ def build_s1_spot_ask_target(
         raise ValueError("future_contracts must be a positive integer")
 
     spot_reason = _spot_book_reason(spot_book, observation_cursor)
-    future_reason: str | None = None
     future_exec = None
-    if future_book is None:
-        future_reason = "missing_future_book"
-    elif future_book.book_cursor.cursor > observation_cursor:
+    if future_book is not None and future_book.book_cursor.cursor > observation_cursor:
         raise ValueError("future book cannot follow the observation cursor")
-    else:
-        future_exec, future_reason = executable_book(
+    if future_book is not None:
+        future_exec, _ = executable_book(
             future_book,
             side="buy",
             quantity=future_contracts,
@@ -107,43 +124,33 @@ def build_s1_spot_ask_target(
             send_eligible_cursor=observation_cursor,
         )
 
-    target_price: float | None = None
-    target_tick: int | None = None
-    effective_basis: float | None = None
+    effective_basis = (
+        None
+        if future_exec is None
+        else effective_basis_bp(
+            ROUTE,
+            frozen_target,
+            fut_exec_ask=future_exec.executable_vwap,
+        )
+    )
     passive = False
     in_band = False
     location: ExitTargetLocation | None = None
     queue_ahead: int | None = None
     queue_observable = False
     target_reason: str | None = None
-    if spot_reason is None and future_exec is not None:
+    if spot_reason is None:
         assert spot_book is not None
-        target_price = target_price_for_basis(
-            ROUTE,
-            threshold,
-            session_date=date,
-            fut_exec_ask=future_exec.executable_vwap,
-        )
-        target_tick = absolute_price_tick(
-            target_price,
-            market="spot",
-            session_date=date,
-        )
-        effective_basis = effective_basis_bp(
-            ROUTE,
-            target_price,
-            fut_exec_ask=future_exec.executable_vwap,
-        )
         passive = is_passive_target(
             ROUTE,
-            target_price,
+            frozen_target,
             spot_bid=spot_book.bids[0].price,
         )
         reference = spot_book.reference_price
         assert reference is not None
-        in_band = price_in_ref_band(target_price, float(reference))
+        in_band = price_in_ref_band(frozen_target, float(reference))
         location, queue_ahead, queue_observable = _locate_target(
-            target_price,
+            frozen_target,
             spot_book,
         )
         if not passive:
@@ -151,7 +158,7 @@ def build_s1_spot_ask_target(
         elif not in_band:
             target_reason = "target_outside_reference_band"
 
-    reason = spot_reason or future_reason or target_reason or "eligible"
+    reason = spot_reason or target_reason or "eligible"
     return S1SpotAskTarget(
         date=date,
         value_code=value_code,
@@ -160,11 +167,11 @@ def build_s1_spot_ask_target(
         scenario_id=scenario_id,
         observation_cursor=observation_cursor,
         frozen_exit_threshold_basis_bp=threshold,
-        future_buy_vwap=(
-            None if future_exec is None else future_exec.executable_vwap
-        ),
-        target_price=target_price,
-        absolute_price_tick=target_tick,
+        frozen_exit_target_price=frozen_target,
+        frozen_exit_absolute_price_tick=frozen_exit_absolute_price_tick,
+        future_buy_vwap=(None if future_exec is None else future_exec.executable_vwap),
+        target_price=frozen_target,
+        absolute_price_tick=frozen_exit_absolute_price_tick,
         effective_exit_basis_bp=effective_basis,
         passive_target=passive,
         target_in_reference_band=in_band,
@@ -173,9 +180,7 @@ def build_s1_spot_ask_target(
         queue_observable=queue_observable,
         gate_open=reason == "eligible",
         gate_reason=reason,
-        spot_book_cursor=(
-            None if spot_book is None else spot_book.book_cursor.cursor
-        ),
+        spot_book_cursor=(None if spot_book is None else spot_book.book_cursor.cursor),
         future_book_cursor=(
             None if future_book is None else future_book.book_cursor.cursor
         ),
@@ -244,6 +249,13 @@ def _finite(value: object, name: str) -> float:
     ):
         raise ValueError(f"{name} must be finite")
     return float(value)
+
+
+def _positive(value: object, name: str) -> float:
+    result = _finite(value, name)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive")
+    return result
 
 
 __all__ = ["S1SpotAskTarget", "build_s1_spot_ask_target"]

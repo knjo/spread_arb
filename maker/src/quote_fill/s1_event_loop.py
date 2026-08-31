@@ -50,6 +50,7 @@ from .s1_accounting import (
     encode_accounting_fact,
 )
 from .s1_admission import CapacityAdmissionPlanner
+from .s1_economic_gate import S1EconomicGateEstimate
 from .s1_entry_controller import (
     CandidateIntentAudit,
     EntryControllerCommand,
@@ -114,7 +115,7 @@ EXIT_STAGE = "exit"
 SPOT = "spot"
 FUTURE = "future"
 CAP_RETRY_DELAY_NS = 1
-S1_CARRY_POSITION_RECORD_SCHEMA_VERSION = 1
+S1_CARRY_POSITION_RECORD_SCHEMA_VERSION = 2
 S1_CARRY_CONTRACT_BINDING_RECORD_SCHEMA_VERSION = 1
 _S1_CARRY_POSITION_RECORD_TYPE = "s1_carry_position"
 _S1_CARRY_CONTRACT_BINDING_RECORD_TYPE = "s1_carry_contract_binding"
@@ -246,6 +247,8 @@ class S1CarryPosition:
     initiating_raw_order_fact_id: str
     hedge_intent_id: str
     frozen_exit_threshold_basis_bp: float
+    frozen_exit_target_price: float
+    frozen_exit_absolute_price_tick: int
     execution_truth: ExecutionTruth
 
     def __post_init__(self) -> None:
@@ -271,6 +274,20 @@ class S1CarryPosition:
         _finite_float(
             self.frozen_exit_threshold_basis_bp,
             "frozen_exit_threshold_basis_bp",
+        )
+        _positive_float(
+            self.frozen_exit_target_price,
+            "frozen_exit_target_price",
+        )
+        _positive_int(
+            self.frozen_exit_absolute_price_tick,
+            "frozen_exit_absolute_price_tick",
+        )
+        _validate_frozen_exit_price_tick(
+            price=self.frozen_exit_target_price,
+            tick=self.frozen_exit_absolute_price_tick,
+            session_date=fact.establishment_date,
+            path="carry frozen exit target",
         )
 
     @property
@@ -300,6 +317,10 @@ def encode_s1_carry_position(carry: S1CarryPosition) -> dict[str, object]:
         "initiating_raw_order_fact_id": carry.initiating_raw_order_fact_id,
         "hedge_intent_id": carry.hedge_intent_id,
         "frozen_exit_threshold_basis_bp": carry.frozen_exit_threshold_basis_bp,
+        "frozen_exit_target_price": carry.frozen_exit_target_price,
+        "frozen_exit_absolute_price_tick": (
+            carry.frozen_exit_absolute_price_tick
+        ),
         "execution_truth": carry.execution_truth,
     }
 
@@ -319,6 +340,8 @@ def decode_s1_carry_position(record: Mapping[str, object]) -> S1CarryPosition:
         "initiating_raw_order_fact_id",
         "hedge_intent_id",
         "frozen_exit_threshold_basis_bp",
+        "frozen_exit_target_price",
+        "frozen_exit_absolute_price_tick",
         "execution_truth",
     }
     _require_carry_codec_keys(record, expected_keys, "S1 carry position")
@@ -348,6 +371,29 @@ def decode_s1_carry_position(record: Mapping[str, object]) -> S1CarryPosition:
         raise S1CarryCodecError(
             "S1 carry position frozen_exit_threshold_basis_bp must be a finite float"
         )
+    exit_target_price = record["frozen_exit_target_price"]
+    if (
+        type(exit_target_price) is not float
+        or not math.isfinite(exit_target_price)
+        or exit_target_price <= 0
+    ):
+        raise S1CarryCodecError(
+            "S1 carry position frozen_exit_target_price must be a positive float"
+        )
+    exit_target_tick = record["frozen_exit_absolute_price_tick"]
+    if type(exit_target_tick) is not int or exit_target_tick <= 0:
+        raise S1CarryCodecError(
+            "S1 carry position frozen_exit_absolute_price_tick must be positive"
+        )
+    try:
+        _validate_frozen_exit_price_tick(
+            price=exit_target_price,
+            tick=exit_target_tick,
+            session_date=fact.establishment_date,
+            path="S1 carry position frozen exit target",
+        )
+    except (TypeError, ValueError) as error:
+        raise S1CarryCodecError(str(error)) from error
     execution_truth = record["execution_truth"]
     if type(execution_truth) is not str or execution_truth not in (
         "approximate",
@@ -374,6 +420,8 @@ def decode_s1_carry_position(record: Mapping[str, object]) -> S1CarryPosition:
                 record["hedge_intent_id"], "S1 carry position hedge_intent_id"
             ),
             frozen_exit_threshold_basis_bp=threshold,
+            frozen_exit_target_price=exit_target_price,
+            frozen_exit_absolute_price_tick=exit_target_tick,
             execution_truth=execution_truth,
         )
         _validate_carry_position_for_codec(carry)
@@ -500,6 +548,10 @@ class EntryObservation:
     gate_reason: str = "base_gate_closed"
     maker_snapshot: ActualSendMakerSnapshot | None = None
     frozen_exit_threshold_basis_bp: float | None = None
+    economic_estimate: S1EconomicGateEstimate | None = None
+    frozen_exit_target_price: float | None = None
+    frozen_exit_absolute_price_tick: int | None = None
+    base_gate_book_wake_venues: frozenset[Venue] = frozenset()
 
     def __post_init__(self) -> None:
         _cursor(self.source_cursor, "source_cursor")
@@ -540,6 +592,38 @@ class EntryObservation:
                 self.frozen_exit_threshold_basis_bp,
                 "frozen_exit_threshold_basis_bp",
             )
+        if (self.frozen_exit_target_price is None) != (
+            self.frozen_exit_absolute_price_tick is None
+        ):
+            raise ValueError("frozen exit price and tick must be present together")
+        if self.frozen_exit_target_price is not None:
+            if self.frozen_exit_threshold_basis_bp is None:
+                raise ValueError("frozen exit price requires lower-basis provenance")
+            _positive_float(
+                self.frozen_exit_target_price,
+                "frozen_exit_target_price",
+            )
+            _positive_int(
+                self.frozen_exit_absolute_price_tick,
+                "frozen_exit_absolute_price_tick",
+            )
+        if self.economic_estimate is not None:
+            if not isinstance(self.economic_estimate, S1EconomicGateEstimate):
+                raise TypeError(
+                    "economic_estimate must be an S1EconomicGateEstimate or None"
+                )
+            if self.economic_estimate.product_id != self.product_id:
+                raise ValueError("economic estimate product identity mismatch")
+            if self.economic_estimate.observation_cursor != self.source_cursor:
+                raise ValueError("economic estimate cursor mismatch")
+            if self.admission_open and not self.economic_estimate.gate_open:
+                raise ValueError("admission cannot bypass a closed economic gate")
+        if not isinstance(self.base_gate_book_wake_venues, frozenset):
+            raise TypeError("base_gate_book_wake_venues must be a frozenset")
+        if self.base_gate_book_wake_venues.difference((SPOT, FUTURE)):
+            raise ValueError("base-gate book wakes must name spot or future")
+        if self.base_gate_open and self.base_gate_book_wake_venues:
+            raise ValueError("open base gate cannot request a base-gate book wake")
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +695,51 @@ class SentEntryOrder:
     contract_size_shares: int
     maker_snapshot: ActualSendMakerSnapshot
     frozen_exit_threshold_basis_bp: float | None
+    economic_estimate: S1EconomicGateEstimate | None = None
+    frozen_exit_target_price: float | None = None
+    frozen_exit_absolute_price_tick: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.frozen_exit_target_price is None) != (
+            self.frozen_exit_absolute_price_tick is None
+        ):
+            raise ValueError("sent-order frozen exit price/tick must be paired")
+        if self.frozen_exit_target_price is not None:
+            if self.frozen_exit_threshold_basis_bp is None:
+                raise ValueError("sent-order frozen exit price requires lower basis")
+            _positive_float(
+                self.frozen_exit_target_price,
+                "frozen_exit_target_price",
+            )
+            _positive_int(
+                self.frozen_exit_absolute_price_tick,
+                "frozen_exit_absolute_price_tick",
+            )
+            _validate_frozen_exit_price_tick(
+                price=self.frozen_exit_target_price,
+                tick=self.frozen_exit_absolute_price_tick,
+                session_date=self.date,
+                path="sent-order frozen exit target",
+            )
+        estimate = self.economic_estimate
+        if estimate is None:
+            return
+        if not isinstance(estimate, S1EconomicGateEstimate):
+            raise TypeError(
+                "economic_estimate must be an S1EconomicGateEstimate or None"
+            )
+        if estimate.evaluation_stage != "actual_send_refresh":
+            raise ValueError("sent order requires an actual-send economic estimate")
+        if (
+            estimate.date != self.date
+            or estimate.policy_id != self.policy_id
+            or estimate.product_id != self.product_id
+        ):
+            raise ValueError("sent-order economic estimate identity mismatch")
+        if estimate.observation_cursor.recv_time_ns != self.actual_start_cursor.recv_time_ns:
+            raise ValueError("sent-order economic estimate timestamp mismatch")
+        if not estimate.gate_open:
+            raise ValueError("sent order cannot bypass a closed economic gate")
 
     @property
     def maker_snapshot_channel_seq(self) -> int:
@@ -1011,6 +1140,8 @@ class _Position:
     state: PositionState
     rollback_request_id: str | None = None
     frozen_exit_threshold_basis_bp: float | None = None
+    frozen_exit_target_price: float | None = None
+    frozen_exit_absolute_price_tick: int | None = None
     entry_execution_truth: ExecutionTruth = "approximate"
     position_established_fact: PositionEstablishedFact | None = None
 
@@ -1401,6 +1532,10 @@ class S1EventLoop:
                 hedge_intent_id=value.hedge_intent_id,
                 state="paired_open",
                 frozen_exit_threshold_basis_bp=(value.frozen_exit_threshold_basis_bp),
+                frozen_exit_target_price=value.frozen_exit_target_price,
+                frozen_exit_absolute_price_tick=(
+                    value.frozen_exit_absolute_price_tick
+                ),
                 entry_execution_truth=value.execution_truth,
                 position_established_fact=fact,
             )
@@ -1641,7 +1776,7 @@ class S1EventLoop:
                         "VenueBookUpdate cannot be mixed with RiskBookAdapter"
                     )
                 self._books[event.venue][event.product_id].ingest(event.event)
-                if self.normal_exit_enabled:
+                if self.normal_exit_enabled and event.venue == SPOT:
                     self._exit_probe_products[timestamp_ns].add(event.product_id)
                 continue
             if isinstance(event, ContractExpiry):
@@ -1671,6 +1806,10 @@ class S1EventLoop:
                     is not None
                 ):
                     self._new_probe_products[timestamp_ns].add(event.product_id)
+                self._schedule_next_economic_gate_change(
+                    event,
+                    after_cursor=event.source_cursor,
+                )
                 continue
             if isinstance(event, EntryCutoff):
                 if self._cutoff_applied:
@@ -1705,8 +1844,6 @@ class S1EventLoop:
         assignment_cursor = EventCursor(timestamp_ns, PHASE_ASSIGN, 0)
         probe_products = self._entry_probe_products_at(timestamp_ns)
         for product_id in sorted(probe_products):
-            if self.controllers[product_id].pending_candidate_intent_id is None:
-                continue
             state = self.entry_state_adapter.current_state(
                 product_id,
                 assignment_cursor,
@@ -1735,7 +1872,72 @@ class S1EventLoop:
                     gate_reason=state.gate_reason,
                 )
                 self._apply_commands(product_id, commands)
+                self._schedule_next_economic_gate_change(
+                    state,
+                    after_cursor=assignment_cursor,
+                )
             self._actual_state[product_id] = state
+
+    def _schedule_next_economic_gate_change(
+        self,
+        state: EntryObservation,
+        *,
+        after_cursor: EventCursor,
+    ) -> None:
+        """Wake a book-blocked candidate on its next relevant causal change.
+
+        Sparse policy observations deliberately omit unchanged target/AB state.
+        A cost gate can reopen when either executable leg changes.  A base gate
+        closed specifically by an unavailable or illegal raw book can likewise
+        recover, but only the venue recorded by the state resolver is queried.
+        Ordinary closed base/AB states continue to rely on the policy stream.
+        """
+
+        adapter = self.risk_book_adapter
+        if after_cursor < state.source_cursor:
+            raise ValueError("entry-gate wake cursor precedes its observed state")
+        if (
+            adapter is None
+            or self._cutoff_applied
+            or self._expiry_due
+            or state.admission_open
+        ):
+            return
+        if state.base_gate_open:
+            if not state.gate_reason.startswith("economic_gate:"):
+                return
+            wake_venues: tuple[Venue, ...] = (SPOT, FUTURE)
+        else:
+            wake_venues = tuple(sorted(state.base_gate_book_wake_venues))
+            if not wake_venues:
+                return
+        product = self.products[state.product_id]
+        deadline_ns = min(
+            product.spot_session_end_time_ns,
+            product.future_session_end_time_ns,
+        )
+        for venue in wake_venues:
+            candidate = adapter.next_change_cursor(
+                venue,
+                state.product_id,
+                after_cursor,
+                deadline_ns,
+            )
+            if candidate is None:
+                continue
+            if not isinstance(candidate, EventCursor):
+                raise TypeError(
+                    "RiskBookAdapter.next_change_cursor must return "
+                    "EventCursor or None"
+                )
+            if candidate <= after_cursor:
+                raise ValueError("next entry-gate book change must follow its query")
+            if candidate.event_sequence >= PHASE_OBSERVE:
+                raise ValueError("next entry-gate book change must be a raw cursor")
+            if candidate.recv_time_ns > deadline_ns:
+                raise ValueError("next entry-gate book change exceeds session deadline")
+            self._new_probe_products[candidate.recv_time_ns].add(state.product_id)
+            self._schedule_time(candidate.recv_time_ns)
 
     def _process_contract_expiry(
         self,
@@ -1973,7 +2175,9 @@ class S1EventLoop:
             )
             positions = controller.positions
             targets: dict[str, S1SpotAskTarget] = {}
-            target_by_threshold: dict[float, S1SpotAskTarget] = {}
+            target_by_frozen_price: dict[
+                tuple[float, float, int], S1SpotAskTarget
+            ] = {}
 
             for position in positions:
                 targets[position.position_id] = self._cached_exit_target(
@@ -1981,7 +2185,7 @@ class S1EventLoop:
                     observation_cursor,
                     spot_book,
                     future_book,
-                    target_by_threshold,
+                    target_by_frozen_price,
                 )
             positions_changed = False
             for activation in pending:
@@ -1990,7 +2194,7 @@ class S1EventLoop:
                     observation_cursor,
                     spot_book,
                     future_book,
-                    target_by_threshold,
+                    target_by_frozen_price,
                 )
                 targets[activation.position_id] = target
                 if not target.gate_open or target.absolute_price_tick is None:
@@ -2038,7 +2242,7 @@ class S1EventLoop:
                         observation_cursor,
                         spot_book,
                         future_book,
-                        target_by_threshold,
+                        target_by_frozen_price,
                     )
                     for position in positions
                 )
@@ -2090,12 +2294,18 @@ class S1EventLoop:
         cursor: EventCursor,
         spot_book: CausalBookState | None,
         future_book: CausalBookState | None,
-        target_by_threshold: dict[float, S1SpotAskTarget],
+        target_by_frozen_price: dict[
+            tuple[float, float, int], S1SpotAskTarget
+        ],
     ) -> S1SpotAskTarget:
-        threshold = self._positions[position_id].frozen_exit_threshold_basis_bp
-        if threshold is None:
-            raise RuntimeError("normal exit position lacks a frozen threshold")
-        template = target_by_threshold.get(threshold)
+        position = self._positions[position_id]
+        threshold = position.frozen_exit_threshold_basis_bp
+        target_price = position.frozen_exit_target_price
+        target_tick = position.frozen_exit_absolute_price_tick
+        if threshold is None or target_price is None or target_tick is None:
+            raise RuntimeError("normal exit position lacks a frozen absolute target")
+        key = (threshold, target_price, target_tick)
+        template = target_by_frozen_price.get(key)
         if template is None:
             template = self._build_exit_target(
                 position_id,
@@ -2103,7 +2313,7 @@ class S1EventLoop:
                 spot_book,
                 future_book,
             )
-            target_by_threshold[threshold] = template
+            target_by_frozen_price[key] = template
             return template
         return replace(template, position_id=position_id)
 
@@ -2116,8 +2326,10 @@ class S1EventLoop:
     ) -> S1SpotAskTarget:
         position = self._positions[position_id]
         threshold = position.frozen_exit_threshold_basis_bp
-        if threshold is None:
-            raise RuntimeError("normal exit position lacks a frozen threshold")
+        target_price = position.frozen_exit_target_price
+        target_tick = position.frozen_exit_absolute_price_tick
+        if threshold is None or target_price is None or target_tick is None:
+            raise RuntimeError("normal exit position lacks a frozen absolute target")
         product = self.products[position.product_id]
         return build_s1_spot_ask_target(
             date=self.config.date,
@@ -2127,6 +2339,8 @@ class S1EventLoop:
             scenario_id=self.config.policy_id,
             observation_cursor=cursor,
             frozen_exit_threshold_basis_bp=threshold,
+            frozen_exit_target_price=target_price,
+            frozen_exit_absolute_price_tick=target_tick,
             spot_book=spot_book,
             future_book=future_book,
             future_contracts=product.future_contracts,
@@ -2255,7 +2469,14 @@ class S1EventLoop:
             return None
         fact = position.position_established_fact
         threshold = position.frozen_exit_threshold_basis_bp
-        if fact is None or threshold is None:
+        target_price = position.frozen_exit_target_price
+        target_tick = position.frozen_exit_absolute_price_tick
+        if (
+            fact is None
+            or threshold is None
+            or target_price is None
+            or target_tick is None
+        ):
             return None
         balances = self._ledger.account_balances(position.capacity_id)
         if (
@@ -2281,6 +2502,8 @@ class S1EventLoop:
             initiating_raw_order_fact_id=(position.initiating_raw_order_fact_id),
             hedge_intent_id=position.hedge_intent_id,
             frozen_exit_threshold_basis_bp=threshold,
+            frozen_exit_target_price=target_price,
+            frozen_exit_absolute_price_tick=target_tick,
             execution_truth=position.entry_execution_truth,
         )
 
@@ -2293,10 +2516,7 @@ class S1EventLoop:
         if adapter is None:
             return
         product = self.products[product_id]
-        for venue, deadline_ns in (
-            (SPOT, product.spot_session_end_time_ns),
-            (FUTURE, product.future_session_end_time_ns),
-        ):
+        for venue, deadline_ns in ((SPOT, product.spot_session_end_time_ns),):
             exit_quote_change = getattr(
                 adapter,
                 "next_exit_quote_change_cursor",
@@ -3279,6 +3499,10 @@ class S1EventLoop:
                 hedge_id,
                 "hedge_pending",
                 frozen_exit_threshold_basis_bp=(order.frozen_exit_threshold_basis_bp),
+                frozen_exit_target_price=order.frozen_exit_target_price,
+                frozen_exit_absolute_price_tick=(
+                    order.frozen_exit_absolute_price_tick
+                ),
                 entry_execution_truth=potential.execution_truth,
             )
             self._positions[position_id] = position
@@ -3655,9 +3879,13 @@ class S1EventLoop:
         self._request_bindings.pop(assignment.request_id, None)
         self._hedges.pop(hedge.attempt.intent.hedge_intent_id, None)
         if self.normal_exit_enabled:
-            if position.frozen_exit_threshold_basis_bp is None:
+            if (
+                position.frozen_exit_threshold_basis_bp is None
+                or position.frozen_exit_target_price is None
+                or position.frozen_exit_absolute_price_tick is None
+            ):
                 raise RuntimeError(
-                    "normal exit requires a frozen exit threshold on entry"
+                    "normal exit requires a frozen absolute exit target on entry"
                 )
             self._positions_needing_settlement.append(position.position_id)
 
@@ -4208,6 +4436,14 @@ class S1EventLoop:
             snapshot = state.maker_snapshot
             if snapshot is None:
                 raise RuntimeError("assigned new lacks its frozen maker snapshot")
+            if self.normal_exit_enabled and (
+                state.frozen_exit_threshold_basis_bp is None
+                or state.frozen_exit_target_price is None
+                or state.frozen_exit_absolute_price_tick is None
+            ):
+                raise RuntimeError(
+                    "normal exit entry assignment lacks a frozen absolute exit target"
+                )
             cursor = EventCursor(
                 timestamp_ns,
                 PHASE_NEW_WORKING,
@@ -4220,23 +4456,30 @@ class S1EventLoop:
             )
             product = self.products[binding.product_id]
             order = SentEntryOrder(
-                self.config.date,
-                self.config.policy_id,
-                binding.product_id,
-                product.value_code,
-                product.quote_code,
-                value.assignment.request_id,
-                candidate_id,
-                working.raw_order_fact_id,
-                working.policy_alias_id,
-                candidate_id,
-                cursor,
-                tick,
-                target_price,
-                reservation,
-                product.contract_size_shares,
-                snapshot,
-                state.frozen_exit_threshold_basis_bp,
+                date=self.config.date,
+                policy_id=self.config.policy_id,
+                product_id=binding.product_id,
+                value_code=product.value_code,
+                quote_code=product.quote_code,
+                request_id=value.assignment.request_id,
+                candidate_intent_id=candidate_id,
+                raw_order_fact_id=working.raw_order_fact_id,
+                policy_alias_id=working.policy_alias_id,
+                capacity_id=candidate_id,
+                actual_start_cursor=cursor,
+                absolute_price_tick=tick,
+                target_price=target_price,
+                reservation_notional_twd=reservation,
+                contract_size_shares=product.contract_size_shares,
+                maker_snapshot=snapshot,
+                frozen_exit_threshold_basis_bp=(
+                    state.frozen_exit_threshold_basis_bp
+                ),
+                economic_estimate=state.economic_estimate,
+                frozen_exit_target_price=state.frozen_exit_target_price,
+                frozen_exit_absolute_price_tick=(
+                    state.frozen_exit_absolute_price_tick
+                ),
             )
             order_state = _OrderState(order, "working")
             self._orders_by_raw_id[order.raw_order_fact_id] = order_state
@@ -5019,7 +5262,7 @@ class S1EventLoop:
             raise ValueError("next risk-book change must be a raw-event cursor")
         if candidate.recv_time_ns > deadline_ns:
             raise ValueError("next risk-book change exceeds the attempt deadline")
-        if self.normal_exit_enabled:
+        if self.normal_exit_enabled and venue == SPOT:
             self._exit_probe_products[candidate.recv_time_ns].add(product_id)
         self._schedule_time(candidate.recv_time_ns)
 
@@ -5068,7 +5311,7 @@ class S1EventLoop:
         # last capacity decision was blocked must participate in current-state
         # refresh and priority traversal; only spot_eligible may suppress the
         # duplicate planner audit after proving its complete signature unchanged.
-        return set(self._pending_entry_product_ids())
+        return set(triggered).union(self._pending_entry_product_ids())
 
     def _pending_entry_product_ids(self) -> frozenset[str]:
         return frozenset(
@@ -5088,6 +5331,9 @@ class S1EventLoop:
             state.gate_reason,
             state.maker_snapshot,
             state.frozen_exit_threshold_basis_bp,
+            state.frozen_exit_target_price,
+            state.frozen_exit_absolute_price_tick,
+            state.economic_estimate,
         )
 
     def _blocked_admission_sleep_value(
@@ -5315,6 +5561,21 @@ def _validate_carry_position_for_codec(carry: S1CarryPosition) -> None:
         raise S1CarryCodecError(
             "S1 carry position frozen_exit_threshold_basis_bp must be a finite float"
         )
+    if (
+        type(carry.frozen_exit_target_price) is not float
+        or not math.isfinite(carry.frozen_exit_target_price)
+        or carry.frozen_exit_target_price <= 0
+    ):
+        raise S1CarryCodecError(
+            "S1 carry position frozen_exit_target_price must be a positive float"
+        )
+    if (
+        type(carry.frozen_exit_absolute_price_tick) is not int
+        or carry.frozen_exit_absolute_price_tick <= 0
+    ):
+        raise S1CarryCodecError(
+            "S1 carry position frozen_exit_absolute_price_tick must be positive"
+        )
     if type(carry.execution_truth) is not str or carry.execution_truth not in (
         "approximate",
         "exact",
@@ -5494,6 +5755,32 @@ def _positive_float(value: object, name: str) -> float:
     if result <= 0:
         raise ValueError(f"{name} must be a positive number")
     return result
+
+
+def _validate_frozen_exit_price_tick(
+    *,
+    price: object,
+    tick: object,
+    session_date: object,
+    path: str,
+) -> None:
+    """Require one frozen Spot exit price and its persisted tick to agree."""
+
+    target_price = _positive_float(price, f"{path} price")
+    target_tick = _positive_int(tick, f"{path} tick")
+    date_value = _valid_date(session_date, f"{path} session_date")
+    try:
+        expected_tick = absolute_price_tick(
+            target_price,
+            market="spot",
+            session_date=date_value,
+        )
+    except ValueError as error:
+        raise ValueError(f"{path} price is not on the legal spot ladder") from error
+    if target_tick != expected_tick:
+        raise ValueError(
+            f"{path} price/tick mismatch: expected {expected_tick}, got {target_tick}"
+        )
 
 
 def _required_positive_float(value: object, name: str) -> float:

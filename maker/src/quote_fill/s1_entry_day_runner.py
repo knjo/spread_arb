@@ -27,7 +27,17 @@ from typing import Final
 
 import polars as pl
 
-from ..common.paths import HFT_DATA_ROOT, MAKER_ROOT
+from ..common.paths import (
+    INDIVIDUAL_STOCK_FUTURES_REQUIRED_MOUNT,
+    INDIVIDUAL_STOCK_FUTURES_ROOT,
+    LEGACY_HFT_DATA_ROOT,
+    MAKER_ROOT,
+    MAKERFILL_ROOT,
+    PIPELINE_STORAGE,
+    SPOT_TICK_ROOT,
+    resolve_input_file,
+    validate_required_mount,
+)
 from .capacity_ledger import CapacityLedger
 from .layered import EventCursor
 from .makerfill_adapter import MakerFillLabelIndex, MakerFillScalarEvent
@@ -47,6 +57,7 @@ from .s1_day_state import (
     build_s1_policy_state_changes,
     materialize_s1_common_day,
 )
+from .s1_economic_gate import S1EconomicGateAudit, S1EconomicGateEstimate
 from .s1_entry_state_adapter import S1EntryStateAdapter, merge_entry_events
 from .s1_event_loop import (
     ContractExpiry,
@@ -66,20 +77,27 @@ from .s1_raw_book_adapter import (
     build_raw_book_day_index_from_scans,
 )
 from .s1_raw_entry_provider import S1RawEntryBookProvider
+from .s1_scenario_spec import (
+    SCENARIO_IDS,
+    S1ScenarioSpec,
+    build_s1_scenario_spec_table,
+)
 from .s1_spot_close_adapter import SpotCloseDayIndex
 from .s1_spot_trade_adapter import (
     SpotTradeDayIndex,
     build_spot_trade_day_index_from_scan,
 )
 
-RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v2_multiday_expiry"
+RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v4_frozen_absolute_exit"
 DEVELOPMENT_END_DATE: Final = "20260813"
 ONE_SECOND_NS: Final = 1_000_000_000
 SPOT_CLOSE_DELAY_SECONDS: Final = 600
 DEFAULT_DAILY_ROOT: Final = MAKER_ROOT / "data" / "walkforward" / "daily"
-DEFAULT_MAKERFILL_ROOT: Final = HFT_DATA_ROOT / "makerFill"
-DEFAULT_SPOT_TICK_ROOT: Final = HFT_DATA_ROOT / "tickData"
-DEFAULT_FUTURE_TICK_ROOT: Final = Path("/mnt/NAS/Parquet/Ticks")
+DEFAULT_MAKERFILL_ROOT: Final = MAKERFILL_ROOT
+DEFAULT_SPOT_TICK_ROOT: Final = SPOT_TICK_ROOT
+DEFAULT_FUTURE_TICK_ROOT: Final = INDIVIDUAL_STOCK_FUTURES_ROOT
+
+S1EntrySpec = PolicySpec | S1ScenarioSpec
 
 CAUSAL_INPUT_COLUMNS: Final = (
     "Date",
@@ -123,11 +141,39 @@ class S1EntryRunnerPaths:
     entry_lookup_path: Path = DEFAULT_ENTRY_LOOKUP_PATH
     convergence_path: Path = DEFAULT_CONVERGENCE_PATH
 
+    def __post_init__(self) -> None:
+        for name in (
+            "daily_root",
+            "makerfill_root",
+            "spot_tick_root",
+            "future_tick_root",
+            "mother_path",
+            "entry_lookup_path",
+            "convergence_path",
+        ):
+            if not isinstance(getattr(self, name), Path):
+                raise TypeError(f"{name} must be a Path")
+        if self.future_tick_root.resolve() == PIPELINE_STORAGE.txf_tick_dir.resolve():
+            raise ValueError(
+                "individual stock-futures root cannot use the TXF tick directory"
+            )
+        if self.future_tick_root != INDIVIDUAL_STOCK_FUTURES_ROOT:
+            raise ValueError(
+                "future_tick_root must use the individual-stock-futures NAS root"
+            )
+
     def causal_path(self, date: str) -> Path:
         return self.daily_root / f"Date={date}" / "causal_fair.parquet"
 
     def makerfill_path(self, date: str) -> Path:
-        return self.makerfill_root / f"{date}_makerFill.parquet"
+        filename = f"{date}_makerFill.parquet"
+        return resolve_input_file(
+            self.makerfill_root / filename,
+            canonical=DEFAULT_MAKERFILL_ROOT / filename,
+            role="makerfill",
+            legacy_parents=(LEGACY_HFT_DATA_ROOT / "makerFill",),
+            canonical_required_mount=PIPELINE_STORAGE.required_mount,
+        )
 
     def mapping_path(self, date: str) -> Path:
         return self.daily_root / f"Date={date}" / "mapping.parquet"
@@ -136,23 +182,36 @@ class S1EntryRunnerPaths:
         return self.daily_root / "metadata" / f"{date}_contracts.parquet"
 
     def spot_raw_path(self, date: str) -> Path:
-        return self.spot_tick_root / f"{date}_StockTick.parquet"
+        filename = f"{date}_StockTick.parquet"
+        return resolve_input_file(
+            self.spot_tick_root / filename,
+            canonical=DEFAULT_SPOT_TICK_ROOT / filename,
+            role="spot_raw",
+            legacy_parents=(LEGACY_HFT_DATA_ROOT / "tickData",),
+            canonical_required_mount=PIPELINE_STORAGE.required_mount,
+        )
 
     def future_raw_path(self, date: str) -> Path:
-        return (
+        path = (
             self.future_tick_root
             / date[:4]
             / date[4:6]
             / date[6:8]
             / "stock_futures.parquet"
         )
+        if self.future_tick_root == DEFAULT_FUTURE_TICK_ROOT:
+            validate_required_mount(
+                INDIVIDUAL_STOCK_FUTURES_REQUIRED_MOUNT,
+                role="future_raw",
+            )
+        return resolve_input_file(path, role="future_raw")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedS1EntryDay:
     date: str
     policy_ids: tuple[str, ...]
-    specs_by_policy: Mapping[str, tuple[PolicySpec, ...]] = field(repr=False)
+    specs_by_policy: Mapping[str, tuple[S1EntrySpec, ...]] = field(repr=False)
     common_decisions: pl.DataFrame = field(repr=False)
     state_changes_by_policy: Mapping[str, pl.DataFrame] = field(repr=False)
     raw_books: RawBookDayIndex = field(repr=False)
@@ -251,10 +310,15 @@ class PreparedS1EntryDay:
                 raise ValueError("an expiry product lacks an official spot close")
         elif self.spot_closes is not None:
             raise ValueError("spot_closes supplied without an expiring product")
+        expected_spec_type = (
+            S1ScenarioSpec if _uses_scenario_ids(policy_ids) else PolicySpec
+        )
         for policy_id in policy_ids:
             specs = tuple(self.specs_by_policy[policy_id])
             if not specs or any(spec.policy_id != policy_id for spec in specs):
-                raise ValueError("prepared PolicySpec values do not match policy")
+                raise ValueError("prepared entry specs do not match policy")
+            if any(not isinstance(spec, expected_spec_type) for spec in specs):
+                raise TypeError("legacy PolicySpec and S1ScenarioSpec values cannot mix")
             changes = self.state_changes_by_policy[policy_id]
             if not isinstance(changes, pl.DataFrame) or changes.is_empty():
                 raise ValueError("prepared policy state changes cannot be empty")
@@ -281,7 +345,17 @@ class S1EntryDaySummary:
     date: str
     policy_id: str
     product_count: int
+    lookup_cells: int
+    lookup_supported_cells: int
+    lookup_unsupported_cells: int
     sparse_state_changes: int
+    decision_economic_checks: int
+    decision_economic_gate_open: int
+    decision_economic_gate_closed: int
+    actual_send_economic_checks: int
+    actual_send_economic_gate_open: int
+    actual_send_economic_gate_closed: int
+    actual_send_not_sent_after_gate_pass: int
     sent_entry_orders: int
     makerfill_supported_orders: int
     makerfill_eod_positive_orders: int
@@ -308,6 +382,9 @@ class S1EntryDaySummary:
     entry_hedges_delayed: int
     max_entry_hedge_retry_delay_ms: float | None
     makerfill_eod_positive_rate: float | None
+    makerfill_support_rate_of_sent: float | None
+    actual_active_fill_rate_of_supported: float | None
+    actual_active_fill_rate_of_sent: float | None
     actual_active_fill_rate: float | None
     entry_hedge_success_rate: float | None
     performance_available: bool
@@ -328,13 +405,15 @@ class S1EntryDaySummary:
 class S1EntryDayRun:
     result: S1ReplayResult = field(repr=False)
     makerfill_assessments: tuple[MakerFillScalarEvent, ...] = field(repr=False)
+    economic_gate_estimates: tuple[S1EconomicGateEstimate, ...] = field(repr=False)
+    economic_gate_audits: tuple[S1EconomicGateAudit, ...] = field(repr=False)
     summary: S1EntryDaySummary
 
 
 def prepare_s1_entry_day(
     date: str,
     *,
-    policy_ids: Sequence[str] = POLICY_IDS,
+    policy_ids: Sequence[str] = SCENARIO_IDS,
     paths: S1EntryRunnerPaths | None = None,
     required_exit_only_bindings: Sequence[S1CarryContractBinding] = (),
 ) -> PreparedS1EntryDay:
@@ -364,18 +443,30 @@ def prepare_s1_entry_day(
         if not path.is_file():
             raise FileNotFoundError(f"missing {role} input: {path}")
 
-    policy_table = build_policy_spec_table(
-        _read_date_partition(selected_paths.mother_path, date),
-        _read_date_partition(selected_paths.entry_lookup_path, date),
-        _read_date_partition(selected_paths.convergence_path, date),
+    mother = _read_date_partition(selected_paths.mother_path, date)
+    entry_lookup = _read_date_partition(selected_paths.entry_lookup_path, date)
+    convergence = _read_date_partition(selected_paths.convergence_path, date)
+    if _uses_scenario_ids(requested):
+        spec_table = build_s1_scenario_spec_table(
+            mother,
+            entry_lookup,
+            convergence,
+        )
+        id_column = "scenario_id"
+    else:
+        spec_table = build_policy_spec_table(
+            mother,
+            entry_lookup,
+            convergence,
+        )
+        id_column = "policy_id"
+    day_spec_table = spec_table.filter(
+        (pl.col("Date") == date) & pl.col(id_column).is_in(requested)
     )
-    day_policy_table = policy_table.filter(
-        (pl.col("Date") == date) & pl.col("policy_id").is_in(requested)
-    )
-    specs_by_policy = _specs_by_policy(day_policy_table, requested)
+    specs_by_policy = _specs_by_policy(day_spec_table, requested)
     product_codes = _common_product_codes(specs_by_policy)
     product_keys = _product_keys(specs_by_policy)
-    del policy_table, day_policy_table
+    del mother, entry_lookup, convergence, spec_table, day_spec_table
 
     causal_day = (
         pl.scan_parquet(source_paths["causal_fair"])
@@ -585,10 +676,21 @@ def run_s1_entry_policy(
     )
     result = loop.run(external)
     assessments = makerfill.assessments
+    estimates = entry_state.economic_gate_estimates
+    economic_audits = _economic_gate_audits(estimates, result)
     return S1EntryDayRun(
         result=result,
         makerfill_assessments=assessments,
-        summary=_summarize(prepared, policy_id, result, assessments),
+        economic_gate_estimates=estimates,
+        economic_gate_audits=economic_audits,
+        summary=_summarize(
+            prepared,
+            policy_id,
+            result,
+            assessments,
+            estimates,
+            economic_audits,
+        ),
     )
 
 
@@ -622,11 +724,57 @@ def run_s1_entry_policies(
         )
 
 
+def _economic_gate_audits(
+    estimates: Sequence[S1EconomicGateEstimate],
+    result: S1ReplayResult,
+) -> tuple[S1EconomicGateAudit, ...]:
+    """Join each actual-send refresh to the dispatch result it causally gated."""
+
+    sent_by_key: dict[tuple[str, str, EventCursor], str] = {}
+    for order in result.orders:
+        estimate = order.economic_estimate
+        if estimate is None:
+            raise RuntimeError("sent S1 entry order lacks its economic estimate")
+        key = (estimate.policy_id, estimate.product_id, estimate.observation_cursor)
+        if key in sent_by_key:
+            raise RuntimeError("sent economic-gate audit key is duplicated")
+        sent_by_key[key] = order.raw_order_fact_id
+
+    audits: list[S1EconomicGateAudit] = []
+    seen_keys: set[tuple[str, str, EventCursor]] = set()
+    for estimate in estimates:
+        if estimate.evaluation_stage != "actual_send_refresh":
+            continue
+        key = (estimate.policy_id, estimate.product_id, estimate.observation_cursor)
+        if key in seen_keys:
+            raise RuntimeError("actual-send economic-gate refresh is duplicated")
+        seen_keys.add(key)
+        raw_order_fact_id = sent_by_key.get(key)
+        if raw_order_fact_id is not None:
+            outcome = "sent"
+        elif estimate.gate_open:
+            outcome = "not_sent_after_gate_pass"
+        else:
+            outcome = "economic_gate_blocked"
+        audits.append(
+            S1EconomicGateAudit(
+                estimate=estimate,
+                dispatch_outcome=outcome,
+                raw_order_fact_id=raw_order_fact_id,
+            )
+        )
+    if set(sent_by_key).difference(seen_keys):
+        raise RuntimeError("sent order has no actual-send economic-gate refresh")
+    return tuple(audits)
+
+
 def _summarize(
     prepared: PreparedS1EntryDay,
     policy_id: str,
     result: S1ReplayResult,
     assessments: tuple[MakerFillScalarEvent, ...],
+    estimates: tuple[S1EconomicGateEstimate, ...],
+    economic_audits: tuple[S1EconomicGateAudit, ...],
 ) -> S1EntryDaySummary:
     supported = sum(event.outcome_supported for event in assessments)
     eod_positive = sum(event.makerfill_potential_fill is True for event in assessments)
@@ -669,11 +817,49 @@ def _summarize(
         default=0,
     )
     hedge_delays = _entry_hedge_retry_delays_ns(result)
+    specs = prepared.specs_by_policy[policy_id]
+    lookup_cells = len(specs)
+    lookup_supported = sum(
+        bool(getattr(spec, "lookup_supported", True)) for spec in specs
+    )
+    decision_estimates = tuple(
+        value
+        for value in estimates
+        if value.evaluation_stage == "decision_observation"
+    )
+    actual_estimates = tuple(
+        value for value in estimates if value.evaluation_stage == "actual_send_refresh"
+    )
+    if len(actual_estimates) != len(economic_audits):
+        raise RuntimeError("actual-send economic estimates/audits differ")
+    audit_counts = Counter(value.dispatch_outcome for value in economic_audits)
+    if audit_counts["sent"] != len(result.orders):
+        raise RuntimeError("sent orders differ from economic-gate audits")
     return S1EntryDaySummary(
         date=prepared.date,
         policy_id=policy_id,
         product_count=len(prepared.entry_product_ids),
+        lookup_cells=lookup_cells,
+        lookup_supported_cells=lookup_supported,
+        lookup_unsupported_cells=lookup_cells - lookup_supported,
         sparse_state_changes=prepared.state_changes_by_policy[policy_id].height,
+        decision_economic_checks=len(decision_estimates),
+        decision_economic_gate_open=sum(
+            value.gate_open for value in decision_estimates
+        ),
+        decision_economic_gate_closed=sum(
+            not value.gate_open for value in decision_estimates
+        ),
+        actual_send_economic_checks=len(actual_estimates),
+        actual_send_economic_gate_open=sum(
+            value.gate_open for value in actual_estimates
+        ),
+        actual_send_economic_gate_closed=sum(
+            not value.gate_open for value in actual_estimates
+        ),
+        actual_send_not_sent_after_gate_pass=audit_counts[
+            "not_sent_after_gate_pass"
+        ],
         sent_entry_orders=len(result.orders),
         makerfill_supported_orders=supported,
         makerfill_eod_positive_orders=eod_positive,
@@ -706,6 +892,15 @@ def _summarize(
             None if not hedge_delays else max(hedge_delays) / 1_000_000.0
         ),
         makerfill_eod_positive_rate=_rate(eod_positive, supported),
+        makerfill_support_rate_of_sent=_rate(supported, len(result.orders)),
+        actual_active_fill_rate_of_supported=_rate(
+            entry_maker_executions,
+            supported,
+        ),
+        actual_active_fill_rate_of_sent=_rate(
+            entry_maker_executions,
+            len(result.orders),
+        ),
         actual_active_fill_rate=_rate(entry_maker_executions, supported),
         entry_hedge_success_rate=_rate(
             entry_hedge_executions,
@@ -723,24 +918,32 @@ def _summarize(
 def _specs_by_policy(
     frame: pl.DataFrame,
     policy_ids: tuple[str, ...],
-) -> dict[str, tuple[PolicySpec, ...]]:
+) -> dict[str, tuple[S1EntrySpec, ...]]:
     if frame.is_empty():
-        raise ValueError("date has no selected PolicySpec rows")
-    result: dict[str, tuple[PolicySpec, ...]] = {}
+        raise ValueError("date has no selected entry-spec rows")
+    scenario_mode = _uses_scenario_ids(policy_ids)
+    id_column = "scenario_id" if scenario_mode else "policy_id"
+    result: dict[str, tuple[S1EntrySpec, ...]] = {}
     for policy_id in policy_ids:
-        selected = frame.filter(pl.col("policy_id") == policy_id).sort(
+        selected = frame.filter(pl.col(id_column) == policy_id).sort(
             "ValueCode", "entry_tod_bucket"
         )
         if selected.is_empty():
-            raise ValueError(f"date has no PolicySpec rows for {policy_id}")
-        result[policy_id] = tuple(
-            PolicySpec.from_dict(row) for row in selected.iter_rows(named=True)
-        )
+            raise ValueError(f"date has no entry-spec rows for {policy_id}")
+        if scenario_mode:
+            result[policy_id] = tuple(
+                S1ScenarioSpec.from_dict(row)
+                for row in selected.iter_rows(named=True)
+            )
+        else:
+            result[policy_id] = tuple(
+                PolicySpec.from_dict(row) for row in selected.iter_rows(named=True)
+            )
     return result
 
 
 def _common_product_codes(
-    specs_by_policy: Mapping[str, tuple[PolicySpec, ...]],
+    specs_by_policy: Mapping[str, tuple[S1EntrySpec, ...]],
 ) -> list[str]:
     product_sets = {
         policy_id: {spec.ValueCode for spec in specs}
@@ -753,7 +956,7 @@ def _common_product_codes(
 
 
 def _product_keys(
-    specs_by_policy: Mapping[str, tuple[PolicySpec, ...]],
+    specs_by_policy: Mapping[str, tuple[S1EntrySpec, ...]],
 ) -> pl.DataFrame:
     first = next(iter(specs_by_policy.values()))
     keys = pl.from_dicts(
@@ -1169,11 +1372,32 @@ def _validate_policy_ids(values: Sequence[str]) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         raise TypeError("policy_ids must be a sequence of policy names")
     result = tuple(values)
-    if not result or any(value not in POLICY_IDS for value in result):
+    known_ids = frozenset((*POLICY_IDS, *SCENARIO_IDS))
+    if not result or any(
+        not isinstance(value, str) or value not in known_ids for value in result
+    ):
         raise ValueError("policy_ids contain an unknown or empty policy")
     if len(result) != len(set(result)):
         raise ValueError("policy_ids cannot contain duplicates")
+    if any(value in POLICY_IDS for value in result) and any(
+        value in SCENARIO_IDS for value in result
+    ):
+        raise ValueError("legacy policy IDs and S1 scenario IDs cannot be mixed")
     return result
+
+
+def _uses_scenario_ids(policy_ids: Sequence[str]) -> bool:
+    """Return the validated ID namespace without accepting a mixed grid."""
+
+    values = tuple(policy_ids)
+    if not values:
+        raise ValueError("policy_ids cannot be empty")
+    scenario_flags = tuple(value in SCENARIO_IDS for value in values)
+    if all(scenario_flags):
+        return True
+    if not any(scenario_flags) and all(value in POLICY_IDS for value in values):
+        return False
+    raise ValueError("legacy policy IDs and S1 scenario IDs cannot be mixed")
 
 
 def _validate_development_date(value: str) -> None:

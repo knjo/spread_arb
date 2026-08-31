@@ -23,6 +23,7 @@ from ..quote_fill.s1_raw_book_adapter import (
     RawBookKey,
     build_raw_book_day_index,
 )
+from ..quote_fill.targets import absolute_price_tick, target_price_for_basis
 
 BASE = datetime(2026, 5, 5, 1, 0, 0)  # noqa: DTZ001
 
@@ -1224,6 +1225,12 @@ class RawBookDayIndexTest(unittest.TestCase):
             assert state is not None
             outcomes = []
             for threshold in thresholds:
+                frozen_price = target_price_for_basis(
+                    "spot_ask_future_taker",
+                    threshold,
+                    session_date="20260505",
+                    fut_exec_ask=100.5,
+                )
                 target = build_s1_spot_ask_target(
                     date="20260505",
                     value_code="2317",
@@ -1232,6 +1239,12 @@ class RawBookDayIndexTest(unittest.TestCase):
                     scenario_id="randomized-exit-clock",
                     observation_cursor=event.book_cursor.cursor,
                     frozen_exit_threshold_basis_bp=threshold,
+                    frozen_exit_target_price=frozen_price,
+                    frozen_exit_absolute_price_tick=absolute_price_tick(
+                        frozen_price,
+                        market="spot",
+                        session_date="20260505",
+                    ),
                     spot_book=state,
                     future_book=future_book,
                 )

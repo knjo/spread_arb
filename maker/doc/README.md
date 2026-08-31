@@ -14,15 +14,16 @@
 | [fair_mid/PRIOR_DAY.md](fair_mid/PRIOR_DAY.md)、[fair_mid/LEVEL_STABILITY.md](fair_mid/LEVEL_STABILITY.md) | 昨日 prior、level stability 診斷 | 八日 pilot 完成 |
 | [quote_width/RESULTS.md](quote_width/RESULTS.md)、[CYCLE.md](quote_width/CYCLE.md)、[ADAPTIVE_BOUNDS.md](quote_width/ADAPTIVE_BOUNDS.md) | D−1 width、固定 BP sensitivity、自適應非對稱界線 | 八日 pilot；q 與固定 bp 將依 REWORK_PLAN S1 在共同 universe 重驗；`adaptive`／`cycle` 程式已刪 |
 | [02_QUOTE_FILL.md](02_QUOTE_FILL.md)、[quote_fill/REPLAY_SAMPLING.md](quote_fill/REPLAY_SAMPLING.md) | 掛價、取樣、fill／requote 契約 | 已凍結 |
-| [03_HEDGE_COST.md](03_HEDGE_COST.md) | Maker fill 後 50 ms taker 成本 | Entry 完成；exit 待做 |
-| [04_BACKTEST.md](04_BACKTEST.md) | 部位、費稅、逐事件回測 | 因果線 cap 回放已有；exit maker 版待做 |
+| [03_HEDGE_COST.md](03_HEDGE_COST.md) | 50 ms首次判定、最長5秒B6 retry與taker成本 | S1 entry／第一條exit route已實作；正式replay待做 |
+| [04_BACKTEST.md](04_BACKTEST.md) | 部位、費稅、逐事件回測 | Cost-aware S1 chronological cap／第一條exit回歸完成；待正式replay |
 | [WALK_FORWARD.md](WALK_FORWARD.md) | 60-session 日更、fine-tune／holdout 切分 | 契約已定義 |
 | [quote_fill/README.md](quote_fill/README.md) | 因果 pipeline 各段結果索引 | **現行主線入口** |
 | [SKILLS.md](SKILLS.md)、[ASSIGNMENTS.md](ASSIGNMENTS.md) | 能力邊界、work packages | 後續依 S0–S5 實作同步更新 |
 | [quote_fill/AUGUST_ATTRIBUTION_20260824.md](quote_fill/AUGUST_ATTRIBUTION_20260824.md) | S0：8 月 q95 market／boundary vs queue 歸因 | **完成；兩者並列** |
-| [quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5：15s anchor、Q2 trail20、S1 mother與frozen lower重算 | **完整完成；lower選擇待確認** |
+| [quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5：15s anchor、Q2 trail20、S1 mother與frozen lower重算 | 完整完成；已由cost-aware S1 grid採用 |
+| [quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md](quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md) | S1：新七組、成本gate、absolute exit、20M cap與preflight | **程式與359項回歸完成；待smoke／正式replay** |
 | [quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md) | S0.5 前一版 anchor／q 基礎重驗 | 歷史 predecessor |
-| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0／S0.5完成；S1未開始** |
+| [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0／S0.5完成；cost-aware S1待smoke／正式replay** |
 
 文件規則：
 

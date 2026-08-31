@@ -49,6 +49,13 @@ execution probability snapshot(D)
 
 07/20 與 08/11 已在八日 pilot 中被檢視並影響研究設計，所以 7–8 月只能誠實稱 pseudo-holdout。真正 final 要從 08/14 後的新資料開始，程式／設定 hash 鎖定後才逐日產生 prediction/action snapshot，累積滿 60 個 eligible sessions 再解封總結果。
 
+Cost-aware S1 的development entry window固定停在2026-08-13，不能為了讓carry自然結束而讀8/14後資料。S1 policy
+ranking先重播完整71日facts排除已terminal／expiry的position，再對final paired open固定使用8/13 13:20 market books：
+同scenario／商品先聚合數量後，以當下最後合法足量L1–L5做hypothetical liquidation mark（long Spot用executable Bid、
+short Future用executable Ask），扣已發生逐腿成本與lot-aware remaining exit cost。它不生成fill、不算
+completion、不釋放capacity，且必須和terminal realized net分列；任何open position無共同合法價格時，withhold economic
+ranking與S2 shortlist。8/14起資料只准在策略freeze後作真正forward，不得回填development mark。
+
 ## Label maturity
 
 每列 fact 保存 `label_end_date`。`D` table 只接受：

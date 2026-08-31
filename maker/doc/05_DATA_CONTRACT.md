@@ -2,17 +2,26 @@
 
 ## 來源與涵蓋
 
-HFT 資料根目錄為小寫 `data/`。
+現貨 pipeline 資料根目錄不再寫死為 project 內的 `HFT/data/`。唯一 canonical resolver 是 top-level
+`src/pipeline_storage.py`，設定來源是 `config/pipeline.yaml`；目前設定為 `/media/kevin/SSD2/Data`，且
+`required_mount=/media/kevin/SSD2`。研究程式只解析路徑，不得自行建立缺失的 mount 或把資料寫回系統碟。
 
-| 資料 | 路徑 | 2026 涵蓋 |
-|---|---|---|
-| 現貨 tick | `HFT/data/tickData/{YYYYMMDD}_StockTick.parquet` | 145 日，01-02 至 08-11，缺 07-10 |
-| 現貨 feature | `HFT/data/tickFeature/{YYYYMMDD}_tickFeature.parquet` | 同上 |
-| 現貨 makerFill | `HFT/data/makerFill/{YYYYMMDD}_makerFill.parquet` | 同上 |
-| NAS 現貨 raw | `/mnt/NAS/Parquet/Ticks/2026/MM/DD/stock_round.parquet` | 146 日 |
-| NAS 個股期 raw | `/mnt/NAS/Parquet/Ticks/2026/MM/DD/stock_futures.parquet` | 132 日；01-26 至 08-11 連續，另有 01-13、01-20 |
+| 資料 | Canonical path contract |
+|---|---|
+| 現貨 tick | `${data_storage.tick_dir}/{YYYYMMDD}_StockTick.parquet`，目前 `/media/kevin/SSD2/Data/tickData/` |
+| 現貨 feature | `${data_storage.tick_feature_dir}/{YYYYMMDD}_tickFeature.parquet` |
+| 現貨 makerFill | `${data_storage.maker_queue_dir}/{YYYYMMDD}_makerFill.parquet`，目前 `/media/kevin/SSD2/Data/makerFill/` |
+| NAS 現貨 raw | `/mnt/NAS/Parquet/Ticks/YYYY/MM/DD/stock_round.parquet`；只供明示需要它的研究 |
+| NAS 個股期 raw | `/mnt/NAS/Parquet/Ticks/YYYY/MM/DD/stock_futures.parquet`；S1 的唯一個股期 raw source |
 
-`HFT/data/txfTickData/` 是 TXF，不得替代個股期貨。`HFT/data/stockfuture/` 主要是研究產物，也不是完整 raw tape。
+Spot tick／makerFill 只有在呼叫方明示 project 內舊根目錄、舊檔不存在，且 basename 完全相同時，才可 fallback 到
+`pipeline.yaml` 的 canonical SSD2 peer；任意 custom root、不同 basename、`..` 或 symlink component 一律拒絕。
+Canonical mount 不存在時 fail closed。實際選中的絕對路徑、bytes、mtime 與 SHA-256 必須寫入每日 input manifest，
+prepared loader 的實際 source path還要逐 role 與 manifest完全相等。
+
+`txfTickData/` 是台指期 TXF，不得替代個股期貨；個股期 raw 不做 SSD2 fallback。`stockfuture/` 類研究產物也不是
+完整 raw tape。涵蓋日數會隨資料更新改變，production run以 frozen date inventory與每日 manifest為準，不在本文件
+維護容易過時的總日數。
 
 ## 價格與時間
 

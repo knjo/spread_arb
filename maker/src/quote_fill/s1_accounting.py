@@ -284,6 +284,41 @@ class _ValidatedLinkage:
     allocations: tuple[InitiatingExecutionAllocation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class S1SpotInventoryLotSnapshot:
+    """Immutable public view of one remaining Spot FIFO lot."""
+
+    lot_id: str
+    acquisition_date: str
+    shares: int
+    opening_price: float
+
+
+@dataclass(frozen=True, slots=True)
+class S1FutureInventoryLotSnapshot:
+    """Immutable public view of one remaining stock-futures FIFO lot."""
+
+    lot_id: str
+    acquisition_date: str
+    side: Side
+    contracts: int
+    share_equivalent: int
+    opening_price: float
+
+
+@dataclass(frozen=True, slots=True)
+class S1OpenInventorySnapshot:
+    """Verified current lots for one established, unsealed position."""
+
+    position_id: str
+    value_code: str
+    scenario_id: str
+    capacity_id: str
+    establishment_date: str
+    spot_lots: tuple[S1SpotInventoryLotSnapshot, ...]
+    future_lots: tuple[S1FutureInventoryLotSnapshot, ...]
+
+
 type BookKey = tuple[str, str]
 type CursorDateResolver = Callable[[EventCursor], str]
 
@@ -1082,6 +1117,49 @@ class S1AccountingLedger:
             if lot.position_id == position_id
         )
         return spot, future_contracts, future_equivalent
+
+    def open_inventory_snapshot(self, position_id: str) -> S1OpenInventorySnapshot:
+        """Return copied FIFO lots without exposing mutable ledger internals."""
+
+        position_id = _identifier(position_id, "position_id")
+        meta = self._positions.get(position_id)
+        if meta is None:
+            raise AccountingError(f"unknown position_id: {position_id}")
+        establishment = self._establishment_by_position.get(position_id)
+        if establishment is None:
+            raise AccountingError("open inventory snapshot requires establishment")
+        if position_id in self._terminal_by_position:
+            raise InventoryNotFlatError("sealed position has no open inventory snapshot")
+        key = (meta.value_code, meta.scenario_id)
+        return S1OpenInventorySnapshot(
+            position_id=position_id,
+            value_code=meta.value_code,
+            scenario_id=meta.scenario_id,
+            capacity_id=meta.capacity_id,
+            establishment_date=establishment.establishment_date,
+            spot_lots=tuple(
+                S1SpotInventoryLotSnapshot(
+                    lot_id=lot.lot_id,
+                    acquisition_date=lot.acquisition_date,
+                    shares=lot.shares,
+                    opening_price=lot.price,
+                )
+                for lot in self._spot_books.get(key, ())
+                if lot.position_id == position_id
+            ),
+            future_lots=tuple(
+                S1FutureInventoryLotSnapshot(
+                    lot_id=lot.lot_id,
+                    acquisition_date=lot.acquisition_date,
+                    side=lot.side,
+                    contracts=lot.contracts,
+                    share_equivalent=lot.share_equivalent,
+                    opening_price=lot.price,
+                )
+                for lot in self._future_books.get(key, ())
+                if lot.position_id == position_id
+            ),
+        )
 
     def terminal_realized(self, position_id: str) -> TerminalFact:
         position_id = _identifier(position_id, "position_id")

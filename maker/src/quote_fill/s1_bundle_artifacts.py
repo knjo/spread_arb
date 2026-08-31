@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from datetime import date as calendar_date
 from pathlib import Path
 
-BUNDLE_SCHEMA_VERSION = "s1_policy_date_bundle_v1"
-BUNDLE_RUNNER_VERSION = "s1_bundle_artifacts_v2"
+BUNDLE_SCHEMA_VERSION = "s1_policy_date_bundle_v3_economic_gate_estimates"
+BUNDLE_RUNNER_VERSION = "s1_bundle_artifacts_v4"
 
 _JSON_OBJECT_ARTIFACTS = frozenset(
     {
@@ -34,7 +34,12 @@ _JSON_OBJECT_ARTIFACTS = frozenset(
 )
 _JSON_ARRAY_ARTIFACTS = frozenset({"carry.json", "carry_bindings.json"})
 _GZIP_JSONL_ARTIFACTS = frozenset(
-    {"accounting_facts.jsonl.gz", "capacity_transitions.jsonl.gz"}
+    {
+        "accounting_facts.jsonl.gz",
+        "capacity_transitions.jsonl.gz",
+        "economic_gate_estimates.jsonl.gz",
+        "economic_gate_events.jsonl.gz",
+    }
 )
 _PAYLOAD_ARTIFACT_NAMES = frozenset(
     {*_JSON_OBJECT_ARTIFACTS, *_JSON_ARRAY_ARTIFACTS, *_GZIP_JSONL_ARTIFACTS}
@@ -90,6 +95,8 @@ class S1BundlePartitionRecords:
     daily_diagnostics: dict[str, object]
     accounting_fact_records: S1GzipJsonlRecords
     capacity_transition_records: S1GzipJsonlRecords
+    economic_gate_estimate_records: S1GzipJsonlRecords
+    economic_gate_event_records: S1GzipJsonlRecords
     compact_checkpoint_record: dict[str, object]
     carry_records: tuple[dict[str, object], ...]
     carry_binding_records: tuple[dict[str, object], ...]
@@ -109,6 +116,8 @@ def write_s1_bundle_partition(
     daily_diagnostics: Mapping[str, object],
     accounting_fact_records: Iterable[Mapping[str, object]],
     capacity_transition_records: Iterable[Mapping[str, object]],
+    economic_gate_estimate_records: Iterable[Mapping[str, object]],
+    economic_gate_event_records: Iterable[Mapping[str, object]],
     compact_checkpoint_record: Mapping[str, object],
     carry_records: Sequence[Mapping[str, object]],
     carry_binding_records: Sequence[Mapping[str, object]],
@@ -183,6 +192,16 @@ def write_s1_bundle_partition(
             temporary / "capacity_transitions.jsonl.gz",
             capacity_transition_records,
             name="capacity_transition_records",
+        )
+        artifacts["economic_gate_estimates.jsonl.gz"] = _write_gzip_jsonl_stream(
+            temporary / "economic_gate_estimates.jsonl.gz",
+            economic_gate_estimate_records,
+            name="economic_gate_estimate_records",
+        )
+        artifacts["economic_gate_events.jsonl.gz"] = _write_gzip_jsonl_stream(
+            temporary / "economic_gate_events.jsonl.gz",
+            economic_gate_event_records,
+            name="economic_gate_event_records",
         )
         marker_payload: dict[str, object] = {
             "schema_version": BUNDLE_SCHEMA_VERSION,
@@ -329,6 +348,8 @@ def _read_verified_partition(
         daily_diagnostics=diagnostics,
         accounting_fact_records=streams["accounting_facts.jsonl.gz"],
         capacity_transition_records=streams["capacity_transitions.jsonl.gz"],
+        economic_gate_estimate_records=streams["economic_gate_estimates.jsonl.gz"],
+        economic_gate_event_records=streams["economic_gate_events.jsonl.gz"],
         compact_checkpoint_record=_read_canonical_json_object(
             root / "compact_checkpoint.json"
         ),

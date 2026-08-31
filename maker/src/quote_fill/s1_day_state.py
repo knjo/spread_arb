@@ -20,6 +20,7 @@ from ..fair_mid.quote_churn import (
 )
 from .foundation_anchor_selection import materialize_anchor_column
 from .policy_spec import ANCHOR_MODEL_ID, TOD_BUCKETS, PolicySpec
+from .s1_scenario_spec import S1ScenarioSpec
 
 SESSION_START_SECOND: Final = 300
 ENTRY_STOP_SECOND: Final = 14_400
@@ -128,7 +129,7 @@ def materialize_s1_common_day(day: pl.DataFrame) -> pl.DataFrame:
 
 def build_s1_policy_day_state(
     day: pl.DataFrame,
-    specs: Sequence[PolicySpec],
+    specs: Sequence[PolicySpec | S1ScenarioSpec],
     *,
     policy_id: str,
     _sparse_only: bool = False,
@@ -150,8 +151,8 @@ def build_s1_policy_day_state(
     values = tuple(specs)
     if not values:
         raise ValueError("specs cannot be empty")
-    if any(not isinstance(spec, PolicySpec) for spec in values):
-        raise TypeError("specs must contain only PolicySpec values")
+    if any(not isinstance(spec, (PolicySpec, S1ScenarioSpec)) for spec in values):
+        raise TypeError("specs must contain PolicySpec or S1ScenarioSpec values")
     if any(spec.policy_id != policy_id for spec in values):
         raise ValueError("all specs must match policy_id")
 
@@ -168,7 +169,14 @@ def build_s1_policy_day_state(
     if any(spec.Date != date for spec in values):
         raise ValueError("PolicySpec Date does not match the causal day")
 
-    spec_frame = pl.from_dicts([spec.to_dict() for spec in values])
+    spec_rows: list[dict[str, object]] = []
+    for spec in values:
+        row = spec.to_dict()
+        row["policy_id"] = spec.policy_id
+        row.setdefault("lookup_supported", True)
+        row.setdefault("lookup_support_reason", "supported")
+        spec_rows.append(row)
+    spec_frame = pl.from_dicts(spec_rows, infer_schema_length=None)
     duplicate = spec_frame.group_by(_CELL_KEYS).len().filter(pl.col("len") != 1)
     if not duplicate.is_empty():
         raise ValueError("PolicySpec cells are duplicated")
@@ -313,6 +321,7 @@ def build_s1_policy_day_state(
                 & pl.col("passive_target")
                 & pl.col("target_in_reference_band")
                 & pl.col("contract_size_integral")
+                & pl.col("lookup_supported").fill_null(False)
                 & ~pl.col("contains_target_day_outcome").fill_null(True)
             )
             .fill_null(False)
@@ -345,7 +354,7 @@ def build_s1_policy_day_state(
 
 def build_s1_policy_state_changes(
     day: pl.DataFrame,
-    specs: Sequence[PolicySpec],
+    specs: Sequence[PolicySpec | S1ScenarioSpec],
     *,
     policy_id: str,
 ) -> pl.DataFrame:
@@ -467,7 +476,14 @@ def _target_location() -> pl.Expr:
 
 def _gate_reason() -> pl.Expr:
     return (
-        pl.when(~pl.col("analysis_eligible").fill_null(False))
+        pl.when(~pl.col("lookup_supported").fill_null(False))
+        .then(
+            pl.concat_str(
+                pl.lit("lookup_unsupported:"),
+                pl.col("lookup_support_reason").fill_null("unknown"),
+            )
+        )
+        .when(~pl.col("analysis_eligible").fill_null(False))
         .then(pl.lit("input_gate_closed"))
         .when(
             pl.col("selected_anchor_bp").is_null()
