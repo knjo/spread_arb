@@ -22,7 +22,8 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
 | [AUGUST_ATTRIBUTION_20260824.md](AUGUST_ATTRIBUTION_20260824.md) | S0 q95 raw-excursion touch vs post-touch queue 歸因、30-session sensitivity | **完成；兩者並列** |
 | [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5 從頭選 15s anchor／Q2 trail20、S1 mother並重算frozen lower | **完整完成；lower選擇待確認** |
-| [S1_PAUSED_STATUS_20260829.md](S1_PAUSED_STATUS_20260829.md) | S1 77／497 partial baseline、停止原因、成本感知重啟條件與清理紀錄 | **已暫停；不得排名或部署** |
+| [S1_STOP_CLEANUP_20260831.md](S1_STOP_CLEANUP_20260831.md) | S1 最終停止狀態、保留／清除項目與重啟條件 | **最新狀態；目前無執行** |
+| [S1_PAUSED_STATUS_20260829.md](S1_PAUSED_STATUS_20260829.md) | 舊 S1 77／497 partial 的停止原因、11 日方向性摘要與成本感知重啟條件 | 歷史紀錄；bundle 已清除 |
 | [FOUNDATION_REVALIDATION_S05_20260825.md](FOUNDATION_REVALIDATION_S05_20260825.md) | 舊 EWMA120 基礎重驗與重作理由 | 歷史 predecessor；不得作現行 S1 lookup |
 | [../REWORK_PLAN_20260824.md](../REWORK_PLAN_20260824.md) | 因果線擴回原始規格的 S0–S5 checklist | **S0／S0.5完成；舊 S1 partial 已暫停** |
 

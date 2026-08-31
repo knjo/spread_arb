@@ -1,5 +1,8 @@
 # S1 暫停狀態與清理紀錄（2026-08-29）
 
+> 2026-08-31 更新：未完成的 replay bundle 已清除，停止後的最終狀態見
+> [`S1_STOP_CLEANUP_20260831.md`](S1_STOP_CLEANUP_20260831.md)。以下保留為 8/29 當下的歷史紀錄。
+
 ## 現在狀態
 
 - S1 所有由本次研究啟動的 replay、監控、smoke、測試與子任務均已停止；未處理其他專案的
@@ -10,8 +13,7 @@
 - 正式 `POLICY_COMPARISON_SPOT_BID_20260827.md` 未發布，因為完整 497 partitions 與 final verifier
   都未完成。
 
-保留的唯一 partial baseline 是
-[`s1_spot_bid_joint_20260827_v2`](../../data/walkforward/s1_spot_bid_joint_20260827_v2/)：
+當時保留的唯一 partial baseline 是 `s1_spot_bid_joint_20260827_v2`（已於 2026-08-31 清除）：
 
 - 77 個 `complete.json`、784 個檔案，約 4.6 GiB；
 - source commit `828005589c3b5c61c53a8fab020869242cd24cbb`；
