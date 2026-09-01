@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Literal, Protocol
 
@@ -12,6 +12,7 @@ import polars as pl
 
 from .layered import EventCursor
 from .policy_spec import TOD_BUCKETS, PolicySpec
+from .s1_day_state import S1_POLICY_DECISION_SIGNATURE_COLUMNS
 from .s1_economic_gate import (
     UNGATED_CONTROL_RULE,
     S1EconomicGateEstimate,
@@ -479,14 +480,31 @@ class S1EntryStateAdapter:
         missing = sorted(required - set(state_changes.columns))
         if missing:
             raise ValueError(f"state changes missing columns: {missing}")
+        signature_columns = set(S1_POLICY_DECISION_SIGNATURE_COLUMNS)
+        present_signature_columns = signature_columns.intersection(
+            state_changes.columns
+        )
+        if present_signature_columns and present_signature_columns != signature_columns:
+            missing_signature = sorted(signature_columns - present_signature_columns)
+            raise ValueError(
+                "state changes contain a partial policy signature: "
+                f"missing={missing_signature}"
+            )
+        has_policy_signature = present_signature_columns == signature_columns
         ordered = state_changes.select(
             pl.col("Date").cast(pl.String),
             pl.col("ValueCode").cast(pl.String),
             pl.col("decision_time_ns").cast(pl.Int64),
+            *(
+                pl.col(column)
+                for column in S1_POLICY_DECISION_SIGNATURE_COLUMNS
+                if has_policy_signature
+            ),
         ).sort("decision_time_ns", "ValueCode")
         previous: tuple[int, str] | None = None
         row_index_by_time: dict[int, int] = {}
-        for row_date, product_id, timestamp_ns in ordered.iter_rows():
+        for row in ordered.iter_rows():
+            row_date, product_id, timestamp_ns = row[:3]
             if row_date != self.date:
                 raise ValueError("state changes contain another Date")
             if product_id not in self._identity:
@@ -500,7 +518,12 @@ class S1EntryStateAdapter:
             cursor = EventCursor(timestamp_ns, 10, row_index)
             state = self.current_state(product_id, cursor)
             if state is not None:
-                yield state
+                yield replace(
+                    state,
+                    policy_state_signature=(
+                        tuple(row[3:]) if has_policy_signature else None
+                    ),
+                )
 
 
 def _economic_rule(

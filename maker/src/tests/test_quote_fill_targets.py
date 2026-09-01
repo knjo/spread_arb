@@ -57,6 +57,8 @@ class QuoteFillTargetTest(unittest.TestCase):
         self.assertEqual(round_up_to_tick(99.99), 100.0)
         self.assertEqual(round_up_to_tick(499.9), 500.0)
         self.assertEqual(round_up_to_tick(999.9), 1000.0)
+        self.assertIsInstance(round_up_to_tick(500.1), float)
+        self.assertIsInstance(round_up_to_tick(1000.1), float)
         self.assertEqual(absolute_price_tick(100.0), 2300)
         with self.assertRaises(ValueError):
             absolute_price_tick(100.1)

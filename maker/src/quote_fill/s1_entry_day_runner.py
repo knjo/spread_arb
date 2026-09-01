@@ -91,7 +91,7 @@ from .s1_spot_trade_adapter import (
     build_spot_trade_day_index_from_scan,
 )
 
-RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v6_exit_headroom_guard"
+RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v7_entry_decision_clock"
 DEVELOPMENT_END_DATE: Final = "20260813"
 ONE_SECOND_NS: Final = 1_000_000_000
 SPOT_CLOSE_DELAY_SECONDS: Final = 600
@@ -378,6 +378,7 @@ class S1EntryDaySummary:
     admission_checks: int
     blocked_admission_checks: int
     suppressed_redundant_blocked_admission_probes: int
+    reused_incidental_cap_blocked_entry_states: int
     blocked_candidate_intents: int
     candidate_intents: int
     suppressed_after_terminal_fills: int
@@ -893,6 +894,9 @@ def _summarize(
         blocked_admission_checks=blocked,
         suppressed_redundant_blocked_admission_probes=(
             result.suppressed_redundant_blocked_admission_probes
+        ),
+        reused_incidental_cap_blocked_entry_states=(
+            result.reused_incidental_cap_blocked_entry_states
         ),
         blocked_candidate_intents=len(blocked_ids),
         candidate_intents=len(candidate_ids),

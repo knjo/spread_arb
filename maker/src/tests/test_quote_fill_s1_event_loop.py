@@ -27,6 +27,8 @@ from ..quote_fill.s1_cross_ledger_verifier import (
     verify_s1_accounting_capacity_links,
 )
 from ..quote_fill.s1_event_loop import (
+    CAP_RETRY_DELAY_NS,
+    PHASE_SETTLEMENT,
     ActualSendMakerSnapshot,
     ContractExpiry,
     EntryObservation,
@@ -207,6 +209,74 @@ class ExitQuoteQueryRiskBooks(QueryRiskBooks):
             cursor = state.book_cursor.cursor
             if cursor > after_cursor:
                 return cursor if cursor.recv_time_ns <= deadline_ns else None
+        return None
+
+
+class EntryQuoteQueryRiskBooks(QueryRiskBooks):
+    def __init__(
+        self,
+        changes: Mapping[tuple[str, str], Sequence[RawBookEvent]],
+    ) -> None:
+        super().__init__(changes)
+        self.entry_quote_calls: list[tuple[str, str, EventCursor, int]] = []
+
+    def next_entry_quote_change_cursor(
+        self,
+        venue: str,
+        product_id: str,
+        after_cursor: EventCursor,
+        deadline_ns: int,
+    ) -> EventCursor | None:
+        self.entry_quote_calls.append((venue, product_id, after_cursor, deadline_ns))
+        for state in self._states.get((venue, product_id), ()):
+            cursor = state.book_cursor.cursor
+            if cursor > after_cursor:
+                return cursor if cursor.recv_time_ns <= deadline_ns else None
+        return None
+
+
+class ProductEntryClock:
+    def __init__(self, changes: Mapping[str, Sequence[int]]) -> None:
+        self._changes = {
+            product_id: tuple(sorted(values))
+            for product_id, values in changes.items()
+        }
+        self.entry_quote_calls: list[tuple[str, str, EventCursor, int]] = []
+
+    def state_as_of(
+        self,
+        venue: str,
+        product_id: str,
+        cursor: EventCursor,
+    ) -> None:
+        del venue, product_id, cursor
+
+    def next_change_cursor(
+        self,
+        venue: str,
+        product_id: str,
+        after_cursor: EventCursor,
+        deadline_ns: int,
+    ) -> EventCursor | None:
+        return self.next_entry_quote_change_cursor(
+            venue,
+            product_id,
+            after_cursor,
+            deadline_ns,
+        )
+
+    def next_entry_quote_change_cursor(
+        self,
+        venue: str,
+        product_id: str,
+        after_cursor: EventCursor,
+        deadline_ns: int,
+    ) -> EventCursor | None:
+        self.entry_quote_calls.append((venue, product_id, after_cursor, deadline_ns))
+        for timestamp_ns in self._changes.get(product_id, ()):
+            candidate = EventCursor(timestamp_ns, 0, 0)
+            if candidate > after_cursor:
+                return candidate if timestamp_ns <= deadline_ns else None
         return None
 
 
@@ -885,7 +955,9 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         reopened = observation(P1, 150, snapshot=3)
         state = TimelineStateAdapter({P1: (blocked, reopened)})
         future_change = book("future", P1, 150, packet=44)
-        books = QueryRiskBooks({("future", P1): (future_change.event,)})
+        books = EntryQuoteQueryRiskBooks(
+            {("future", P1): (future_change.event,)}
+        )
         loop = S1EventLoop(
             config(),
             (product(P1),),
@@ -901,8 +973,103 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertTrue(
             any(
                 venue == "future" and after.recv_time_ns == 100
-                for venue, _, after, _ in books.next_calls
+                for venue, _, after, _ in books.entry_quote_calls
             )
+        )
+        self.assertEqual(books.next_calls, [])
+
+    def test_raw_admission_blockers_use_their_exact_recovery_venues(self) -> None:
+        cases = (
+            (
+                "target_not_exact_raw_bid1_bid2",
+                True,
+                frozenset(("spot", "future")),
+                "spot",
+            ),
+            (
+                "target_not_passive",
+                False,
+                frozenset(("spot", "future")),
+                "spot",
+            ),
+            (
+                "target_outside_reference_band",
+                False,
+                frozenset(("future",)),
+                "future",
+            ),
+        )
+        for reason, base_open, expected_venues, recovery_venue in cases:
+            with self.subTest(reason=reason):
+                blocked = replace(
+                    observation(P1, 100, admission=False),
+                    base_gate_open=base_open,
+                    gate_reason=reason,
+                )
+                reopened = observation(P1, 150, snapshot=3)
+                state = TimelineStateAdapter({P1: (blocked, reopened)})
+                recovery = book(recovery_venue, P1, 150, packet=44)
+                books = EntryQuoteQueryRiskBooks(
+                    {(recovery_venue, P1): (recovery.event,)}
+                )
+
+                result = S1EventLoop(
+                    config(),
+                    (product(P1),),
+                    entry_state_adapter=state,
+                    risk_book_adapter=books,
+                ).run((blocked, SessionExpiry(EventCursor(300, 30, 0))))
+
+                self.assertEqual(len(result.orders), 1)
+                self.assertEqual(
+                    result.orders[0].actual_start_cursor.recv_time_ns,
+                    150,
+                )
+                queried = {
+                    venue
+                    for venue, product_id, after, _ in books.entry_quote_calls
+                    if product_id == P1 and after.recv_time_ns == 100
+                }
+                self.assertEqual(queried, expected_venues)
+                self.assertEqual(books.next_calls, [])
+
+    def test_parallel_raw_wake_is_stale_after_recovery_sends_working(self) -> None:
+        blocked = replace(
+            observation(P1, 100, admission=False),
+            gate_reason="economic_gate:expected_margin_not_above_floor",
+        )
+        reopened = observation(P1, 150, snapshot=3)
+        later_retreat = observation(
+            P1,
+            200,
+            tick=999,
+            price=99.9,
+            snapshot=4,
+        )
+        state = TimelineStateAdapter({P1: (blocked, reopened, later_retreat)})
+        spot_recovery = book("spot", P1, 150, packet=44)
+        stale_future = book("future", P1, 200, packet=45)
+        books = EntryQuoteQueryRiskBooks(
+            {
+                ("spot", P1): (spot_recovery.event,),
+                ("future", P1): (stale_future.event,),
+            }
+        )
+
+        result = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=state,
+            risk_book_adapter=books,
+        ).run((blocked, SessionExpiry(EventCursor(300, 30, 0))))
+
+        self.assertEqual(len(result.orders), 1)
+        self.assertEqual(result.orders[0].actual_start_cursor.recv_time_ns, 150)
+        self.assertFalse(
+            any(cursor.recv_time_ns == 200 for _, cursor in state.calls)
+        )
+        self.assertFalse(
+            any(event.event_type == "actual_cancelled" for event in result.order_events)
         )
 
     def test_missing_future_ask_reopens_on_future_book_recovery(self) -> None:
@@ -1003,7 +1170,452 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             any(audit.status == "expired" for audit in result.candidate_intent_audit)
         )
 
-    def test_redundant_blocked_admission_probes_sleep_with_economic_equivalence(
+    def test_cap_blocked_monitor_removes_unrelated_global_wake_coupling(self) -> None:
+        def replay(*, include_unrelated_p1_wake: bool) -> S1ReplayResult:
+            p3_open = observation(P3, 50)
+            p3_close = observation(P3, 350, gate=False, admission=False)
+            p2_open = observation(P2, 100)
+            p2_retreat = observation(P2, 200, tick=999, price=99.9)
+            p2_return = observation(P2, 300)
+            p1_blocked = replace(
+                observation(P1, 110, admission=False),
+                gate_reason="economic_gate:expected_margin_not_above_floor",
+            )
+            p1_still_blocked = replace(
+                observation(P1, 200, admission=False),
+                gate_reason="economic_gate:expected_margin_not_above_floor",
+            )
+            p1_open = observation(P1, 300)
+            state = TimelineStateAdapter(
+                {
+                    P1: (p1_blocked, p1_still_blocked, p1_open),
+                    P2: (p2_open, p2_retreat, p2_return),
+                    P3: (p3_open, p3_close),
+                }
+            )
+            p1_clock = (200, 300) if include_unrelated_p1_wake else (300,)
+            result = S1EventLoop(
+                config(global_cap=5_000, product_cap=5_000),
+                (product(P1), product(P2), product(P3)),
+                entry_state_adapter=state,
+                risk_book_adapter=ProductEntryClock(
+                    {
+                        P1: p1_clock,
+                        P2: (200, 300),
+                    }
+                ),
+            ).run(
+                (
+                    p3_open,
+                    p2_open,
+                    p1_blocked,
+                    p3_close,
+                    SessionExpiry(EventCursor(500, 600, 0)),
+                )
+            )
+            self.assertTrue(
+                any(
+                    product_id == P2 and cursor.recv_time_ns == 200
+                    for product_id, cursor in state.calls
+                )
+            )
+            self.assertTrue(
+                any(
+                    product_id == P2 and cursor.recv_time_ns == 300
+                    for product_id, cursor in state.calls
+                )
+            )
+            self.assertEqual(
+                result.reused_incidental_cap_blocked_entry_states,
+                0,
+            )
+            return result
+
+        with_unrelated = replay(include_unrelated_p1_wake=True)
+        without_unrelated = replay(include_unrelated_p1_wake=False)
+
+        self.assertEqual(
+            [(order.product_id, order.actual_start_cursor.recv_time_ns) for order in with_unrelated.orders],
+            [(order.product_id, order.actual_start_cursor.recv_time_ns) for order in without_unrelated.orders],
+        )
+        self.assertEqual(
+            [order.product_id for order in without_unrelated.orders],
+            [P3, P2],
+        )
+        self.assertEqual(with_unrelated.executions, without_unrelated.executions)
+        self.assertEqual(with_unrelated.positions, without_unrelated.positions)
+
+    def test_same_timestamp_sibling_wake_cannot_change_entry_identity(self) -> None:
+        def replay(*, include_sibling_wake: bool) -> S1ReplayResult:
+            target_blocked = replace(
+                observation(P1, 100, admission=False),
+                gate_reason="target_not_exact_raw_bid1_bid2",
+            )
+            target_recovered = observation(P1, 200, snapshot=12)
+            sibling_blocked = replace(
+                observation(P2, 110, admission=False),
+                gate_reason="economic_gate:expected_margin_not_above_floor",
+            )
+            state = TimelineStateAdapter(
+                {
+                    P1: (target_blocked, target_recovered),
+                    P2: (sibling_blocked,),
+                }
+            )
+            return S1EventLoop(
+                config(),
+                (product(P1), product(P2)),
+                entry_state_adapter=state,
+                risk_book_adapter=ProductEntryClock(
+                    {
+                        P1: (200,),
+                        P2: (200,) if include_sibling_wake else (),
+                    }
+                ),
+                fill_adapter=RelativeFillAdapter({P1: 10}),
+            ).run(
+                (
+                    target_blocked,
+                    sibling_blocked,
+                    SessionExpiry(EventCursor(300, 600, 0)),
+                )
+            )
+
+        with_sibling = replay(include_sibling_wake=True)
+        without_sibling = replay(include_sibling_wake=False)
+        with_order = next(order for order in with_sibling.orders if order.product_id == P1)
+        without_order = next(
+            order for order in without_sibling.orders if order.product_id == P1
+        )
+
+        self.assertEqual(with_order.raw_order_fact_id, without_order.raw_order_fact_id)
+        self.assertEqual(with_order.actual_start_cursor, without_order.actual_start_cursor)
+        self.assertEqual(with_order.absolute_price_tick, without_order.absolute_price_tick)
+        self.assertEqual(
+            with_order.candidate_intent_id,
+            without_order.candidate_intent_id,
+        )
+        self.assertEqual(with_order.request_id, without_order.request_id)
+        self.assertEqual(with_order.capacity_id, without_order.capacity_id)
+        with_enqueue = next(
+            event
+            for event in with_sibling.request_events
+            if event.request_id == with_order.request_id
+            and event.event_type == "enqueued"
+        )
+        without_enqueue = next(
+            event
+            for event in without_sibling.request_events
+            if event.request_id == without_order.request_id
+            and event.event_type == "enqueued"
+        )
+        self.assertEqual(
+            (
+                with_enqueue.event_cursor.recv_time_ns,
+                with_enqueue.event_cursor.event_sequence,
+            ),
+            (
+                without_enqueue.event_cursor.recv_time_ns,
+                without_enqueue.event_cursor.event_sequence,
+            ),
+        )
+        self.assertEqual(
+            (
+                with_enqueue.event_cursor.row_index,
+                without_enqueue.event_cursor.row_index,
+            ),
+            (2, 1),
+        )
+        with_position = next(
+            position for position in with_sibling.positions if position.product_id == P1
+        )
+        without_position = next(
+            position for position in without_sibling.positions if position.product_id == P1
+        )
+        self.assertEqual(with_position.position_id, without_position.position_id)
+        self.assertEqual(with_position.capacity_id, without_position.capacity_id)
+
+    def test_incidental_raw_wake_reuses_exact_cap_blocked_sleep(self) -> None:
+        def replay(
+            *,
+            include_unrelated_wake: bool,
+        ) -> tuple[S1ReplayResult, TimelineStateAdapter, ProductEntryClock]:
+            p3_open = observation(P3, 50)
+            p2_open = observation(P2, 100)
+            p1_blocked = replace(
+                observation(P1, 110, admission=False),
+                gate_reason="economic_gate:expected_margin_not_above_floor",
+            )
+            state = TimelineStateAdapter(
+                {
+                    P1: (p1_blocked,),
+                    P2: (p2_open,),
+                    P3: (p3_open,),
+                }
+            )
+            books = ProductEntryClock(
+                {
+                    P1: (200,) if include_unrelated_wake else (),
+                    P2: (300,),
+                }
+            )
+            result = S1EventLoop(
+                config(global_cap=5_000, product_cap=5_000),
+                (product(P1), product(P2), product(P3)),
+                entry_state_adapter=state,
+                risk_book_adapter=books,
+            ).run(
+                (
+                    p3_open,
+                    p2_open,
+                    p1_blocked,
+                    SessionExpiry(EventCursor(400, 600, 0)),
+                )
+            )
+            return result, state, books
+
+        with_unrelated, state, books = replay(include_unrelated_wake=True)
+        without_unrelated, _, _ = replay(include_unrelated_wake=False)
+
+        self.assertFalse(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 200
+                for product_id, cursor in state.calls
+            )
+        )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 300
+                for product_id, cursor in state.calls
+            )
+        )
+        self.assertFalse(
+            any(
+                product_id == P2 and after.recv_time_ns == 200
+                for _, product_id, after, _ in books.entry_quote_calls
+            )
+        )
+        self.assertEqual(
+            with_unrelated.reused_incidental_cap_blocked_entry_states,
+            1,
+        )
+        self.assertEqual(
+            without_unrelated.reused_incidental_cap_blocked_entry_states,
+            0,
+        )
+        self.assertEqual(with_unrelated.orders, without_unrelated.orders)
+        self.assertEqual(with_unrelated.request_events, without_unrelated.request_events)
+        self.assertEqual(with_unrelated.order_events, without_unrelated.order_events)
+        self.assertEqual(with_unrelated.executions, without_unrelated.executions)
+        self.assertEqual(with_unrelated.positions, without_unrelated.positions)
+        self.assertEqual(
+            with_unrelated.capacity_transitions,
+            without_unrelated.capacity_transitions,
+        )
+
+    def test_capacity_retry_never_reuses_cap_blocked_state(self) -> None:
+        p3_open = observation(P3, 50)
+        p2_open = observation(P2, 100, snapshot=21)
+        p3_close = observation(P3, 200, gate=False, admission=False)
+        p2_at_retry = observation(
+            P2,
+            200 + CAP_RETRY_DELAY_NS,
+            tick=1_001,
+            price=100.5,
+            snapshot=22,
+        )
+        state = TimelineStateAdapter(
+            {
+                P2: (p2_open, p2_at_retry),
+                P3: (p3_open, p3_close),
+            }
+        )
+
+        result = S1EventLoop(
+            config(global_cap=5_000, product_cap=5_000),
+            (product(P2), product(P3)),
+            entry_state_adapter=state,
+        ).run(
+            (
+                p3_open,
+                p2_open,
+                p3_close,
+                SessionExpiry(EventCursor(300, 600, 0)),
+            )
+        )
+
+        retry_time_ns = 200 + CAP_RETRY_DELAY_NS
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == retry_time_ns
+                for product_id, cursor in state.calls
+            )
+        )
+        p2_order = next(order for order in result.orders if order.product_id == P2)
+        self.assertEqual(p2_order.actual_start_cursor.recv_time_ns, retry_time_ns)
+        self.assertEqual(p2_order.absolute_price_tick, 1_001)
+        self.assertEqual(p2_order.target_price, 100.5)
+        self.assertEqual(p2_order.maker_snapshot_channel_seq, 22)
+        self.assertEqual(result.reused_incidental_cap_blocked_entry_states, 0)
+
+    def test_token_wake_refetches_cap_blocked_candidate_before_send(self) -> None:
+        p3_open = observation(P3, 50)
+        p2_open = observation(P2, 100, snapshot=21)
+        p3_close = observation(P3, 200, gate=False, admission=False)
+        p2_at_token = observation(
+            P2,
+            300,
+            tick=1_002,
+            price=101.0,
+            snapshot=23,
+        )
+        state = TimelineStateAdapter(
+            {
+                P2: (p2_open, p2_at_token),
+                P3: (p3_open, p3_close),
+            }
+        )
+
+        result = S1EventLoop(
+            config(
+                global_cap=5_000,
+                product_cap=5_000,
+                spot_request_cap=1,
+                window_ns=100,
+            ),
+            (product(P2), product(P3)),
+            entry_state_adapter=state,
+        ).run(
+            (
+                p3_open,
+                p2_open,
+                p3_close,
+                SessionExpiry(EventCursor(400, 600, 0)),
+            )
+        )
+
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 300
+                for product_id, cursor in state.calls
+            )
+        )
+        p2_order = next(order for order in result.orders if order.product_id == P2)
+        self.assertEqual(p2_order.actual_start_cursor.recv_time_ns, 300)
+        self.assertEqual(p2_order.absolute_price_tick, 1_002)
+        self.assertEqual(p2_order.target_price, 101.0)
+        self.assertEqual(p2_order.maker_snapshot_channel_seq, 23)
+        self.assertEqual(result.reused_incidental_cap_blocked_entry_states, 0)
+
+    def test_unchanged_panel_signature_cannot_act_as_raw_policy_heartbeat(self) -> None:
+        p3_open = replace(
+            observation(P3, 50),
+            policy_state_signature=("p3-open",),
+        )
+        p2_open = replace(
+            observation(P2, 100),
+            policy_state_signature=("same-panel-intent",),
+        )
+        repeated_full_row = replace(
+            observation(P2, 200, tick=999, price=99.9),
+            policy_state_signature=("same-panel-intent",),
+        )
+
+        def replay(*, include_repeated_full_row: bool) -> S1ReplayResult:
+            events: tuple[S1ExternalEvent, ...] = (
+                p3_open,
+                p2_open,
+                *((repeated_full_row,) if include_repeated_full_row else ()),
+                SessionExpiry(EventCursor(500, 600, 0)),
+            )
+            return S1EventLoop(
+                config(global_cap=5_000, product_cap=5_000),
+                (product(P2), product(P3)),
+                entry_state_adapter=TimelineStateAdapter(
+                    {
+                        P2: (p2_open,),
+                        P3: (p3_open,),
+                    }
+                ),
+            ).run(events)
+
+        full = replay(include_repeated_full_row=True)
+        sparse = replay(include_repeated_full_row=False)
+
+        self.assertEqual(full, sparse)
+        self.assertFalse(
+            any(audit.status == "coalesced" for audit in full.candidate_intent_audit)
+        )
+
+    def test_policy_supersession_rebinds_cap_monitor_before_raw_retreat(self) -> None:
+        p3_open = observation(P3, 50)
+        p3_close = observation(P3, 450, gate=False, admission=False)
+        p2_open = replace(
+            observation(P2, 100),
+            policy_state_signature=("policy-a",),
+        )
+        p2_superseded = replace(
+            observation(P2, 200),
+            policy_state_signature=("policy-b",),
+        )
+        p2_retreat = replace(
+            observation(P2, 300, admission=False),
+            gate_reason="target_not_exact_raw_bid1_bid2",
+        )
+        p2_return = observation(P2, 400)
+        state = TimelineStateAdapter(
+            {
+                P2: (p2_open, p2_superseded, p2_retreat, p2_return),
+                P3: (p3_open, p3_close),
+            }
+        )
+
+        result = S1EventLoop(
+            config(global_cap=5_000, product_cap=5_000),
+            (product(P2), product(P3)),
+            entry_state_adapter=state,
+            risk_book_adapter=ProductEntryClock({P2: (300, 400)}),
+        ).run(
+            (
+                p3_open,
+                p2_open,
+                p2_superseded,
+                p3_close,
+                SessionExpiry(EventCursor(500, 600, 0)),
+            )
+        )
+
+        self.assertEqual(
+            [
+                (event.cursor.recv_time_ns, event.admitted)
+                for event in result.admission_events
+                if event.product_id == P2
+            ],
+            [(100, False), (200, False), (400, False), (451, True)],
+        )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 200
+                for product_id, cursor in state.calls
+            )
+        )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 300
+                for product_id, cursor in state.calls
+            )
+        )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 400
+                for product_id, cursor in state.calls
+            )
+        )
+        p2_order = next(order for order in result.orders if order.product_id == P2)
+        self.assertEqual(p2_order.actual_start_cursor.recv_time_ns, 451)
+        self.assertEqual(result.reused_incidental_cap_blocked_entry_states, 0)
+
+    def test_unchanged_full_policy_rows_match_sparse_blocked_admission(
         self,
     ) -> None:
         admitted = observation(P2, 100, notional=5_000)
@@ -1060,10 +1672,10 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             event for event in legacy.admission_events if not event.admitted
         ]
         self.assertEqual(len(optimized_blocked), 2)
-        self.assertEqual(len(legacy_blocked), 22)
+        self.assertEqual(len(legacy_blocked), 2)
         self.assertEqual(
             optimized.suppressed_redundant_blocked_admission_probes,
-            20,
+            0,
         )
         self.assertEqual(optimized.orders, legacy.orders)
         self.assertEqual(optimized.executions, legacy.executions)
@@ -1073,7 +1685,7 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             legacy.capacity_transitions[-1].global_after,
         )
 
-    def test_own_snapshot_change_rechecks_sleeping_blocked_candidate(self) -> None:
+    def test_snapshot_cursor_change_does_not_repeat_same_cap_decision(self) -> None:
         admitted = observation(P2, 100, notional=5_000)
         initial = observation(P1, 100, row=1, notional=5_000, snapshot=801)
         refreshed = observation(P1, 200, notional=5_000, snapshot=802)
@@ -1081,25 +1693,112 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             refreshed,
             source_cursor=EventCursor(300, 10, 0),
         )
-        result = S1EventLoop(
-            config(global_cap=5_000, product_cap=5_000),
-            (product(P1), product(P2)),
-            entry_state_adapter=TimelineStateAdapter(
-                {P1: (initial, refreshed, unchanged), P2: (admitted,)}
-            ),
-        ).run((admitted, initial, refreshed, unchanged))
+        def replay(*, suppress: bool) -> S1ReplayResult:
+            return S1EventLoop(
+                config(global_cap=5_000, product_cap=5_000),
+                (product(P1), product(P2)),
+                entry_state_adapter=TimelineStateAdapter(
+                    {P1: (initial, refreshed, unchanged), P2: (admitted,)}
+                ),
+                suppress_redundant_blocked_admission_probes=suppress,
+            ).run((admitted, initial, refreshed, unchanged))
+
+        result = replay(suppress=True)
+        legacy = replay(suppress=False)
 
         p1_attempts = [
             event for event in result.admission_events if event.product_id == P1
         ]
         self.assertEqual(
             [event.cursor.recv_time_ns for event in p1_attempts],
-            [100, 200],
+            [100],
         )
         self.assertEqual(
             result.suppressed_redundant_blocked_admission_probes,
-            1,
+            0,
         )
+        self.assertEqual(result.orders, legacy.orders)
+        self.assertEqual(result.executions, legacy.executions)
+        self.assertEqual(result.positions, legacy.positions)
+        self.assertEqual(
+            result.capacity_transitions[-1].global_after,
+            legacy.capacity_transitions[-1].global_after,
+        )
+
+        changed_notional = observation(
+            P1,
+            200,
+            notional=6_000,
+            snapshot=802,
+        )
+        repeated_changed_notional = replace(
+            changed_notional,
+            source_cursor=EventCursor(300, 10, 0),
+        )
+        changed_result = S1EventLoop(
+            config(global_cap=5_000, product_cap=5_000),
+            (product(P1), product(P2)),
+            entry_state_adapter=TimelineStateAdapter(
+                {
+                    P1: (
+                        initial,
+                        changed_notional,
+                        repeated_changed_notional,
+                    ),
+                    P2: (admitted,),
+                }
+            ),
+        ).run(
+            (
+                admitted,
+                initial,
+                changed_notional,
+                repeated_changed_notional,
+            )
+        )
+        self.assertEqual(
+            [
+                event.cursor.recv_time_ns
+                for event in changed_result.admission_events
+                if event.product_id == P1
+            ],
+            [100, 200],
+        )
+        self.assertEqual(
+            changed_result.suppressed_redundant_blocked_admission_probes,
+            0,
+        )
+
+    def test_legacy_policy_fallback_retries_when_reservation_now_fits(self) -> None:
+        occupying = observation(P2, 50, notional=2_000)
+        blocked = observation(P1, 100, notional=4_000)
+        reduced = observation(P1, 200, notional=3_000, snapshot=802)
+
+        result = S1EventLoop(
+            config(global_cap=5_000, product_cap=5_000),
+            (product(P1), product(P2)),
+            entry_state_adapter=TimelineStateAdapter(
+                {P1: (blocked, reduced), P2: (occupying,)}
+            ),
+        ).run(
+            (
+                occupying,
+                blocked,
+                reduced,
+                SessionExpiry(EventCursor(300, 600, 0)),
+            )
+        )
+
+        self.assertEqual(
+            [
+                (event.cursor.recv_time_ns, event.admitted)
+                for event in result.admission_events
+                if event.product_id == P1
+            ],
+            [(100, False), (200, True)],
+        )
+        p1_order = next(order for order in result.orders if order.product_id == P1)
+        self.assertEqual(p1_order.actual_start_cursor.recv_time_ns, 200)
 
     def test_cross_product_probe_preserves_venue_priority_and_send_stream(self) -> None:
         p2_intent = observation(P2, 100, snapshot=201)
@@ -1107,18 +1806,23 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         p3_trigger = observation(P3, 200, row=1, snapshot=301)
         events = (p2_intent, p3_trigger, SessionExpiry(EventCursor(300, 30, 0)))
 
-        def replay(*, suppress: bool) -> S1ReplayResult:
-            return S1EventLoop(
+        def replay(
+            *,
+            suppress: bool,
+        ) -> tuple[S1ReplayResult, TimelineStateAdapter]:
+            state = TimelineStateAdapter(
+                {P2: (p2_actual,), P3: (p3_trigger,)}
+            )
+            result = S1EventLoop(
                 config(),
                 (product(P2), product(P3)),
-                entry_state_adapter=TimelineStateAdapter(
-                    {P2: (p2_actual,), P3: (p3_trigger,)}
-                ),
+                entry_state_adapter=state,
                 suppress_redundant_blocked_admission_probes=suppress,
             ).run(events)
+            return result, state
 
-        optimized = replay(suppress=True)
-        legacy = replay(suppress=False)
+        optimized, optimized_state = replay(suppress=True)
+        legacy, _ = replay(suppress=False)
 
         self.assertEqual(optimized.orders, legacy.orders)
         self.assertEqual(optimized.request_events, legacy.request_events)
@@ -1141,6 +1845,15 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             ],
             [(P2, 200), (P3, 200)],
         )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == 200
+                for product_id, cursor in optimized_state.calls
+            )
+        )
+        p2_order = next(order for order in optimized.orders if order.product_id == P2)
+        self.assertEqual(p2_order.maker_snapshot_channel_seq, 202)
+        self.assertEqual(optimized.reused_incidental_cap_blocked_entry_states, 0)
 
     def test_same_cursor_admission_cannot_use_later_cancel_release(self) -> None:
         open_p1 = observation(P1, 100, notional=10_000)
@@ -2051,6 +2764,96 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertEqual(report.expiry_marks, 1)
         self.assertEqual(report.linked_capacity_transitions, 1)
         accounting.verify()
+
+    def test_contract_expiry_release_cannot_fund_same_cursor_entry(self) -> None:
+        accounting = S1AccountingBridge(
+            default_date=DATE,
+            scenario_id="q95",
+            products=(
+                S1AccountingProduct(P1, P1, 2_000),
+                S1AccountingProduct(P2, P2, 2_000),
+            ),
+            execution_date_resolver=(
+                lambda cursor: DATE if cursor.recv_time_ns < D2_OPEN_NS else NEXT_DATE
+            ),
+        )
+        day_one_open = observation(P1, D1_OPEN_NS, notional=5_000)
+        ledger = CapacityLedger(global_cap_twd=10_000, product_cap_twd=10_000)
+        day_one = S1EventLoop(
+            config(global_cap=10_000, product_cap=10_000),
+            (product(P1, session_end=D2_OPEN_NS - 1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (day_one_open,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=accounting,
+            capacity_ledger=ledger,
+        ).run(
+            (
+                book("future", P1, D1_OPEN_NS - 10, packet=980),
+                book("spot", P1, D1_OPEN_NS - 10, packet=981),
+                day_one_open,
+            )
+        )
+        self.assertEqual(len(day_one.carry_out), 1)
+
+        restored = CapacityLedger.from_seed(ledger.to_seed(DATE))
+        p2_open = observation(P2, D2_OPEN_NS + 50, notional=6_000)
+        close_time = D2_OPEN_NS + 100
+        close = official_close(P1, close_time, date=NEXT_DATE)
+        result_state = TimelineStateAdapter({P2: (p2_open,)})
+        result = S1EventLoop(
+            config(
+                date=NEXT_DATE,
+                global_cap=10_000,
+                product_cap=10_000,
+            ),
+            (product(P1, end_date=NEXT_DATE), product(P2)),
+            entry_state_adapter=result_state,
+            risk_book_adapter=ProductEntryClock({P2: (close_time,)}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+            accounting_adapter=accounting,
+            capacity_ledger=restored,
+            carry_in=day_one.carry_out,
+            day_open_time_ns=D2_OPEN_NS,
+        ).run(
+            (
+                p2_open,
+                ContractExpiry(close),
+                SessionExpiry(EventCursor(close_time + 10, 600, 0)),
+            )
+        )
+
+        self.assertEqual(
+            [
+                (event.cursor.recv_time_ns, event.admitted)
+                for event in result.admission_events
+                if event.product_id == P2
+            ],
+            [
+                (D2_OPEN_NS + 50, False),
+                (close_time + CAP_RETRY_DELAY_NS, True),
+            ],
+        )
+        self.assertTrue(
+            any(
+                product_id == P2 and cursor.recv_time_ns == close_time
+                for product_id, cursor in result_state.calls
+            )
+        )
+        expiry_release = next(
+            transition
+            for transition in result.capacity_transitions
+            if transition.event_type == "expiry_basis_zero_release"
+        )
+        self.assertEqual(expiry_release.timestamp_ns, close_time)
+        self.assertEqual(expiry_release.event_sequence, PHASE_SETTLEMENT)
+        p2_order = next(order for order in result.orders if order.product_id == P2)
+        self.assertEqual(
+            p2_order.actual_start_cursor.recv_time_ns,
+            close_time + CAP_RETRY_DELAY_NS,
+        )
 
     def test_contract_expiry_one_close_marks_multiple_positions_uniquely(self) -> None:
         first = observation(P1, D1_OPEN_NS, tick=1_000, snapshot=51)

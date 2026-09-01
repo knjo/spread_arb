@@ -4,6 +4,7 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
+from unittest.mock import patch
 
 from maker.src.quote_fill.capacity_ledger import (
     CAPACITY_IDENTITY_REGISTRY_RECEIPT_SCHEMA_VERSION,
@@ -115,6 +116,87 @@ class CapacityLedgerTest(unittest.TestCase):
             self.assertLessEqual(
                 row.product_after.total_committed_notional_twd, 10_000_000
             )
+
+    def test_verify_caches_one_successful_replay_until_append(self) -> None:
+        ledger = CapacityLedger(global_cap_twd=100, product_cap_twd=100)
+        ledger.attempt_new_reservation(
+            transition_id="reserve",
+            timestamp_ns=1,
+            capacity_id="order",
+            product_id="A",
+            requested_notional_twd=100,
+        )
+
+        with patch(
+            "maker.src.quote_fill.capacity_ledger.replay_capacity_transitions",
+            wraps=replay_capacity_transitions,
+        ) as replay:
+            first = ledger.verify()
+            second = ledger.verify()
+            self.assertEqual(replay.call_count, 1)
+            self.assertEqual(second, first)
+
+            blocked = ledger.attempt_new_reservation(
+                transition_id="blocked",
+                timestamp_ns=2,
+                capacity_id="blocked-order",
+                product_id="B",
+                requested_notional_twd=1,
+            )
+            self.assertFalse(blocked.admitted)
+            self.assertEqual(blocked.transition.delta, BucketBalances())
+
+            after_append = ledger.verify()
+            self.assertEqual(replay.call_count, 2)
+            self.assertEqual(after_append, ledger.verify())
+            self.assertEqual(replay.call_count, 2)
+
+    def test_verify_cache_returns_defensive_replay_copies(self) -> None:
+        ledger = CapacityLedger(global_cap_twd=100, product_cap_twd=100)
+        ledger.attempt_new_reservation(
+            transition_id="reserve",
+            timestamp_ns=1,
+            capacity_id="order",
+            product_id="A",
+            requested_notional_twd=50,
+        )
+        fresh = replay_capacity_transitions(ledger.transitions)
+
+        returned = ledger.verify()
+        returned.account_balances.clear()
+        returned.account_products["order"] = "tampered"
+        returned.product_balances["A"] = BucketBalances()
+
+        cached = ledger.verify()
+        self.assertEqual(cached, fresh)
+        self.assertIsNot(cached.account_balances, returned.account_balances)
+        self.assertIsNot(cached.account_products, returned.account_products)
+        self.assertIsNot(cached.product_balances, returned.product_balances)
+
+    def test_verify_cache_does_not_hide_live_state_drift(self) -> None:
+        ledger = CapacityLedger(global_cap_twd=100, product_cap_twd=100)
+        ledger.attempt_new_reservation(
+            transition_id="reserve",
+            timestamp_ns=1,
+            capacity_id="order",
+            product_id="A",
+            requested_notional_twd=50,
+        )
+        ledger.verify()
+        ledger._global_balances = BucketBalances(working_unfilled=49)
+
+        with patch(
+            "maker.src.quote_fill.capacity_ledger.replay_capacity_transitions",
+            wraps=replay_capacity_transitions,
+        ) as replay:
+            with self.assertRaisesRegex(
+                CapacityReplayError,
+                "replayed global balances differ from live state",
+            ):
+                ledger.verify()
+            with self.assertRaises(CapacityReplayError):
+                ledger.verify()
+            self.assertEqual(replay.call_count, 2)
 
     def test_full_fill_directly_moves_working_to_hedge_pending(self) -> None:
         ledger = CapacityLedger()

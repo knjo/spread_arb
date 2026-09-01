@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from time import perf_counter
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -76,7 +77,12 @@ from .s1_daily_diagnostics import (
     build_s1_daily_diagnostics,
     validate_s1_daily_diagnostics,
 )
-from .s1_day_state import ENTRY_STOP_SECOND, EXIT_STOP_SECOND, SESSION_END_SECOND
+from .s1_day_state import (
+    ENTRY_STOP_SECOND,
+    EXIT_STOP_SECOND,
+    S1_POLICY_DECISION_SIGNATURE_COLUMNS,
+    SESSION_END_SECOND,
+)
 from .s1_economic_gate import S1EconomicGateAudit, S1EconomicGateEstimate
 from .s1_entry_day_runner import (
     PreparedS1EntryDay,
@@ -139,19 +145,19 @@ from .s1_scenario_spec import (
 from .transaction_costs import TransactionCostProfile
 
 PRODUCTION_RUNNER_VERSION: Final = (
-    "s1_spot_bid_cost_aware_71x7_v7_exit_headroom_guard"
+    "s1_spot_bid_cost_aware_71x7_v8_entry_decision_clock"
 )
 RUN_CONFIG_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_run_config_v6_exit_headroom_guard"
+    "s1_spot_bid_run_config_v7_entry_decision_clock"
 )
 FINAL_BUNDLE_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_complete_v6_exit_headroom_guard"
+    "s1_spot_bid_complete_v7_entry_decision_clock"
 )
-RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v6_exit_headroom_guard"
-DAILY_METRICS_SCHEMA_VERSION: Final = "s1_spot_bid_daily_v2_cost_aware"
+RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v7_entry_decision_clock"
+DAILY_METRICS_SCHEMA_VERSION: Final = "s1_spot_bid_daily_v3_entry_decision_clock"
 COMMON_POPULATION_SCHEMA_VERSION: Final = "s1_common_population_date_value_quote_tod_v1"
 VERIFICATION_SCHEMA_VERSION: Final = "s1_production_verification_v2_source_bound"
-VERIFIER_VERSION: Final = "s1_production_deep_verifier_v4_exit_headroom_guard"
+VERIFIER_VERSION: Final = "s1_production_deep_verifier_v5_entry_decision_clock"
 VERIFICATION_FILENAME: Final = "verification.json"
 ROUTE_ID: Final = "spot_bid_future_taker__spot_ask_future_taker_exit"
 ENTRY_FILL_TRUTH: Final = "approximate"
@@ -161,13 +167,13 @@ DEFAULT_OUTPUT_ROOT: Final = (
     MAKER_ROOT
     / "data"
     / "walkforward"
-    / "s1_spot_bid_cost_aware_20260901_v3_exit_headroom_guard"
+    / "s1_spot_bid_cost_aware_20260901_v4_entry_decision_clock"
 )
 DEFAULT_REPORT_PATH: Final = (
     MAKER_ROOT
     / "doc"
     / "quote_fill"
-    / "POLICY_COMPARISON_SPOT_BID_20260901_V3_EXIT_HEADROOM_GUARD.md"
+    / "POLICY_COMPARISON_SPOT_BID_20260901_V4_ENTRY_DECISION_CLOCK.md"
 )
 CAPACITY_REGISTRY_FILENAME: Final = "capacity_identity_registry.sqlite"
 GENESIS_PARTITION_SHA256: Final = hashlib.sha256(
@@ -439,6 +445,25 @@ def _semantic_run_config(
         "entry_fill_cursor_exact": False,
         "own_quantity_included": False,
         "partial_entry_fill_included": False,
+        "entry_decision_clock": {
+            "policy_clock": "causal_1hz_panel_relative_state_changes",
+            "policy_decision_signature_columns": list(
+                S1_POLICY_DECISION_SIGNATURE_COLUMNS
+            ),
+            "continuous_anchor_or_margin_in_signature": False,
+            "actual_send_refresh": "exact_causal_raw_book_state",
+            "actual_send_refresh_authoritative": True,
+            "raw_entry_recovery_clock": (
+                "route_visible_spot_bid_future_sell_buy_state_changes"
+            ),
+            "raw_entry_recovery_venues": ["spot", "future"],
+            "capacity_blocked_monitor": (
+                "product_policy_generation_until_send_or_policy_supersession"
+            ),
+            "stale_raw_wake_policy": "generation_invalidated_fail_closed",
+            "risk_route_clock": "generic_effective_raw_book_changes",
+            "panel_raw_reconstruction_equivalence_claimed": False,
+        },
         "exit_fill_truth": EXIT_FILL_TRUTH,
         "anchor_model_id": ANCHOR_MODEL_ID,
         "entry_boundary_id": ENTRY_CANDIDATE_ID,
@@ -1198,6 +1223,13 @@ def _run_s1_production_bundle(
             if current_date != date:
                 del prepared
                 gc.collect()
+                prepare_started = perf_counter()
+                _print_runtime_progress(
+                    event="s1_date_prepare_start",
+                    date=date,
+                    completed=resumed_partitions + executed,
+                    total=len(coordinates),
+                )
                 _manifest, date_manifest_sha256 = _ensure_date_input_manifest(
                     config,
                     date=date,
@@ -1223,6 +1255,21 @@ def _run_s1_production_bundle(
                 _verify_file_records_stable(manifest_records)
                 _validate_prepared_day(prepared, date=date, catalog=catalog)
                 current_date = date
+                _print_runtime_progress(
+                    event="s1_date_prepare_complete",
+                    date=date,
+                    completed=resumed_partitions + executed,
+                    total=len(coordinates),
+                    elapsed_seconds=perf_counter() - prepare_started,
+                    sparse_state_rows=sum(
+                        frame.height
+                        for frame in prepared.state_changes_by_policy.values()
+                    ),
+                    raw_events=prepared.raw_books.retained_event_count,
+                    entry_route_raw_changes=(
+                        prepared.raw_books.entry_quote_change_count
+                    ),
+                )
             assert prepared is not None
             state = states[policy_id]
             _capture_common_horizon_opening_bindings(state, date=date)
@@ -1231,6 +1278,14 @@ def _run_s1_production_bundle(
                 date_input_manifest_sha256=date_manifest_sha256,
                 previous_global_partition_sha256=previous_global_sha256,
                 state=state,
+            )
+            partition_started = perf_counter()
+            _print_runtime_progress(
+                event="s1_partition_start",
+                date=date,
+                policy_id=policy_id,
+                completed=resumed_partitions + executed,
+                total=len(coordinates),
             )
             previous_global_sha256 = _execute_policy_date_partition(
                 config=config,
@@ -1249,6 +1304,7 @@ def _run_s1_production_bundle(
                 policy_id=policy_id,
                 completed=resumed_partitions + executed,
                 total=len(coordinates),
+                elapsed_seconds=perf_counter() - partition_started,
             )
             if max_new_partitions is not None and executed >= max_new_partitions:
                 return None
@@ -2880,6 +2936,9 @@ def _aggregate_daily_diagnostics(
         "suppressed_redundant_blocked_admission_probes": sum(
             row.suppressed_redundant_blocked_admission_probes for row in summaries
         ),
+        "reused_incidental_cap_blocked_entry_states": sum(
+            row.reused_incidental_cap_blocked_entry_states for row in summaries
+        ),
         "carry_notional_days_twd": sum(
             int(record["carry_out_notional_twd"]) for record in validated
         ),
@@ -4207,19 +4266,36 @@ def _is_sha256(value: str) -> bool:
     )
 
 
-def _print_progress(*, date: str, policy_id: str, completed: int, total: int) -> None:
+def _print_runtime_progress(*, event: str, **fields: object) -> None:
+    if not isinstance(event, str) or not event:
+        raise ValueError("progress event must be a non-empty string")
     print(
         json.dumps(
             {
-                "event": "s1_partition_complete",
-                "date": date,
-                "policy_id": policy_id,
-                "completed": completed,
-                "total": total,
+                "event": event,
+                **fields,
             },
             sort_keys=True,
         ),
         flush=True,
+    )
+
+
+def _print_progress(
+    *,
+    date: str,
+    policy_id: str,
+    completed: int,
+    total: int,
+    elapsed_seconds: float,
+) -> None:
+    _print_runtime_progress(
+        event="s1_partition_complete",
+        date=date,
+        policy_id=policy_id,
+        completed=completed,
+        total=total,
+        elapsed_seconds=elapsed_seconds,
     )
 
 

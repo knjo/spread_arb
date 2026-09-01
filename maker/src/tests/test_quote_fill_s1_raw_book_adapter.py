@@ -245,6 +245,25 @@ class RawBookDayIndexTest(unittest.TestCase):
                 effective_expected,
             )
 
+            entry_expected = 0
+            while entry_expected < series.entry_quote_length:
+                derived_position = (
+                    series.entry_quote_position_start + entry_expected
+                )
+                position = int(
+                    index._entry_quote_clock["clock_position"][derived_position]
+                )
+                if (
+                    raw_book_adapter._clock_boundary(index._clock, position, boundary)
+                    > boundary
+                ):
+                    break
+                entry_expected += 1
+            self.assertEqual(
+                index._entry_quote_right_index(series, boundary),
+                entry_expected,
+            )
+
             exit_expected = 0
             while exit_expected < series.exit_quote_length:
                 derived_position = series.exit_quote_position_start + exit_expected
@@ -570,6 +589,7 @@ class RawBookDayIndexTest(unittest.TestCase):
             {
                 "clock",
                 "effective_clock",
+                "entry_quote_clock",
                 "exit_quote_clock",
                 "spot_lookup",
                 "spot_l1",
@@ -786,6 +806,382 @@ class RawBookDayIndexTest(unittest.TestCase):
             boundary = change
         self.assertEqual(actual, expected)
         self.assertEqual(index.effective_event_count(key), len(expected))
+
+    def test_spot_entry_clock_matches_generic_target_and_ab12_state(self) -> None:
+        rows = [
+            _row(
+                "spot",
+                code="2317",
+                second=0,
+                channel=1,
+                packet=1,
+                BestBidPrice=100.0,
+                BestBidLots=1,
+                BestAskPrice=100.5,
+                BestAskLots=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=1,
+                channel=2,
+                packet=2,
+                BidPrice1=99.0,
+                BidLots1=1,
+                BidPrice2=98.0,
+                BidLots2=1,
+                BidPrice3=97.0,
+                BidLots3=1,
+                AskPrice1=101.0,
+                AskLots1=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=2,
+                channel=3,
+                packet=3,
+                BidPrice1=99.0,
+                BidLots1=50,
+                BidPrice2=98.0,
+                BidLots2=60,
+                BidPrice3=97.0,
+                BidLots3=70,
+                AskPrice1=101.0,
+                AskLots1=80,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=3,
+                channel=4,
+                packet=4,
+                BidPrice1=99.0,
+                BidLots1=1,
+                BidPrice2=96.0,
+                BidLots2=1,
+                BidPrice3=98.0,
+                BidLots3=1,
+                AskPrice1=101.0,
+                AskLots1=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=4,
+                channel=5,
+                packet=5,
+                BidPrice1=99.0,
+                BidLots1=1,
+                BidPrice2=96.0,
+                BidLots2=1,
+                BidPrice3=95.0,
+                BidLots3=1,
+                AskPrice1=101.0,
+                AskLots1=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=5,
+                channel=6,
+                packet=6,
+                BestBidPrice=100.0,
+                BestBidLots=1,
+                BestAskPrice=100.6,
+                BestAskLots=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=6,
+                channel=7,
+                packet=7,
+                trial=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=7,
+                channel=8,
+                packet=8,
+                trial=1,
+            ),
+            _row(
+                "spot",
+                code="2317",
+                second=8,
+                channel=9,
+                packet=9,
+                BestBidPrice=100.0,
+                BestBidLots=1,
+                BestAskPrice=100.6,
+                BestAskLots=1,
+            ),
+        ]
+        index = build_raw_book_day_index(
+            pl.from_dicts(rows, infer_schema_length=None),
+            _future_rows(),
+            _mapping(),
+        )
+        key = RawBookKey("spot", "2317", "DHFB6")
+        indexed_events = tuple(
+            index.iter_indexed_changes(key, _ns(0) - 1, _ns(9))
+        )
+        expected: list[RawBookCursor] = []
+        previous: tuple[object, ...] | None = None
+        for indexed in indexed_events:
+            state = index.state_as_of(key, indexed.event.book_cursor)
+            assert state is not None
+            source_prices: tuple[float | None, float | None] = (None, None)
+            if state.gate_open:
+                source = index.spot_source_snapshot(
+                    key,
+                    indexed.source_cursor.channel_sequence,
+                    recv_time_ns=indexed.source_cursor.recv_time_ns,
+                )
+                assert source is not None
+                source_prices = (
+                    source.bid_price1 if source.bid_lots1 > 0 else None,
+                    source.bid_price2 if source.bid_lots2 > 0 else None,
+                )
+            signature = (
+                state.gate_open,
+                *(level.price for level in state.bids[:2]),
+                *(None for _ in range(2 - len(state.bids[:2]))),
+                None if not state.asks else state.asks[0].price,
+                *source_prices,
+            )
+            if signature != previous:
+                expected.append(indexed.event.book_cursor)
+            previous = signature
+
+        actual: list[RawBookCursor] = []
+        boundary: int | RawBookCursor = _ns(0) - 1
+        while True:
+            change = index.next_entry_quote_change_cursor(key, boundary)
+            if change is None:
+                break
+            actual.append(change)
+            boundary = change
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            [cursor.cursor.recv_time_ns for cursor in actual],
+            [_ns(value) for value in (0, 1, 3, 5, 6, 8)],
+        )
+        self.assertEqual(index.entry_quote_event_count(key), len(expected))
+        generic_after_source = index.next_effective_change_cursor(key, actual[1])
+        assert generic_after_source is not None
+        self.assertEqual(generic_after_source.cursor.recv_time_ns, _ns(2))
+        self.assertEqual(actual[2].cursor.recv_time_ns, _ns(3))
+        adapter = index.as_risk_book_adapter()
+        self.assertIsNone(
+            adapter.next_entry_quote_change_cursor(
+                "spot",
+                "2317",
+                EventCursor(_ns(0), 0, 0),
+                _ns(0),
+            )
+        )
+        self.assertEqual(
+            adapter.next_entry_quote_change_cursor(
+                "spot",
+                "2317",
+                EventCursor(_ns(0), 0, 0),
+                _ns(1),
+            ),
+            EventCursor(_ns(1), 0, 0),
+        )
+
+    def test_future_entry_clock_matches_generic_two_sided_one_contract_state(
+        self,
+    ) -> None:
+        rows = [
+            _row(
+                "future",
+                code="DHFB6",
+                second=0,
+                channel=1,
+                packet=1,
+                BidPrice1=10_000,
+                BidLots1=1,
+                AskPrice1=10_100,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=1,
+                channel=2,
+                packet=2,
+                BidPrice1=10_000,
+                BidLots1=50,
+                AskPrice1=10_100,
+                AskLots1=60,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=2,
+                channel=3,
+                packet=3,
+                BidPrice1=10_000,
+                BidLots1=1,
+                BidPrice2=9_800,
+                BidLots2=50,
+                AskPrice1=10_100,
+                AskLots1=1,
+                AskPrice2=10_300,
+                AskLots2=50,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=3,
+                channel=4,
+                packet=4,
+                BidPrice1=9_900,
+                BidLots1=1,
+                AskPrice1=10_100,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=4,
+                channel=5,
+                packet=5,
+                BidPrice1=9_900,
+                BidLots1=1,
+                AskPrice1=10_200,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=5,
+                channel=6,
+                packet=6,
+                BidPrice1=10_300,
+                BidLots1=1,
+                AskPrice1=10_200,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=6,
+                channel=7,
+                packet=7,
+                BidPrice1=10_400,
+                BidLots1=1,
+                AskPrice1=10_100,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=7,
+                channel=8,
+                packet=8,
+                BidPrice1=9_900,
+                BidLots1=1,
+                AskPrice1=10_200,
+                AskLots1=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=8,
+                channel=9,
+                packet=9,
+                trial=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=9,
+                channel=10,
+                packet=10,
+                trial=1,
+            ),
+            _row(
+                "future",
+                code="DHFB6",
+                second=10,
+                channel=11,
+                packet=11,
+                BidPrice1=9_900,
+                BidLots1=1,
+                AskPrice1=10_200,
+                AskLots1=1,
+            ),
+        ]
+        index = build_raw_book_day_index(
+            _spot_rows(),
+            pl.from_dicts(rows, infer_schema_length=None),
+            _mapping(),
+        )
+        key = RawBookKey("future", "2317", "DHFB6")
+        raw_events = tuple(index.iter_raw_changes(key, _ns(0) - 1, _ns(11)))
+        expected: list[RawBookCursor] = []
+        previous: tuple[object, ...] | None = None
+        for event in raw_events:
+            state = index.state_as_of(key, event.book_cursor)
+            assert state is not None
+            sell, _ = executable_book(
+                state,
+                side="sell",
+                quantity=1,
+                quantity_unit="future_contracts",
+                send_eligible_cursor=event.book_cursor.cursor,
+            )
+            buy, _ = executable_book(
+                state,
+                side="buy",
+                quantity=1,
+                quantity_unit="future_contracts",
+                send_eligible_cursor=event.book_cursor.cursor,
+            )
+            signature = (
+                state.gate_open,
+                None if sell is None else sell.executable_vwap,
+                None if buy is None else buy.executable_vwap,
+            )
+            if signature != previous:
+                expected.append(event.book_cursor)
+            previous = signature
+
+        actual: list[RawBookCursor] = []
+        boundary: int | RawBookCursor = _ns(0) - 1
+        while True:
+            change = index.next_entry_quote_change_cursor(key, boundary)
+            if change is None:
+                break
+            actual.append(change)
+            boundary = change
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            [cursor.cursor.recv_time_ns for cursor in actual],
+            [_ns(value) for value in (0, 3, 4, 5, 7, 8, 10)],
+        )
+        self.assertEqual(index.entry_quote_event_count(key), len(expected))
+        generic_after_initial = index.next_effective_change_cursor(key, actual[0])
+        assert generic_after_initial is not None
+        self.assertEqual(generic_after_initial.cursor.recv_time_ns, _ns(1))
+        self.assertEqual(actual[1].cursor.recv_time_ns, _ns(3))
+        exit_cursors: list[RawBookCursor] = []
+        exit_boundary: int | RawBookCursor = _ns(0) - 1
+        while True:
+            exit_change = index.next_exit_quote_change_cursor(key, exit_boundary)
+            if exit_change is None:
+                break
+            exit_cursors.append(exit_change)
+            exit_boundary = exit_change
+        self.assertNotIn(
+            _ns(3),
+            {cursor.cursor.recv_time_ns for cursor in exit_cursors},
+        )
 
     def test_spot_exit_clock_uses_bbo_prices_not_depth_or_positive_quantity(
         self,

@@ -17,10 +17,12 @@ import polars as pl
 from ..fair_mid.quote_churn import (
     price_to_tick_index,
     round_down_to_tick,
+    round_up_to_tick,
 )
 from .foundation_anchor_selection import materialize_anchor_column
 from .policy_spec import ANCHOR_MODEL_ID, TOD_BUCKETS, PolicySpec
 from .s1_scenario_spec import S1ScenarioSpec
+from .transaction_costs import TransactionCostProfile
 
 SESSION_START_SECOND: Final = 300
 ENTRY_STOP_SECOND: Final = 14_400
@@ -33,6 +35,8 @@ ENTRY_STOP_SECOND: Final = 14_400
 EXIT_STOP_SECOND: Final = 15_585
 SESSION_END_SECOND: Final = 15_600
 PRICE_EPSILON: Final = 1e-8
+_DECISION_COST_PROFILE: Final = TransactionCostProfile()
+_DECISION_COST_PROFILE.validate()
 
 _PRODUCT_KEYS: Final = ("Date", "ValueCode", "QuoteCode")
 _CELL_KEYS: Final = (*_PRODUCT_KEYS, "entry_tod_bucket")
@@ -79,6 +83,12 @@ S1_DAY_STATE_COLUMNS: Final = (
     "selected_anchor_model",
     "entry_tod_bucket",
     "policy_id",
+    "lookup_supported",
+    "lookup_support_reason",
+    "cost_horizon",
+    "safety_floor_bp",
+    "economic_gate_enabled",
+    "deployment_shortlist_eligible",
     "upper_distance_bp",
     "lower_distance_bp",
     "entry_threshold_multiplier",
@@ -86,6 +96,8 @@ S1_DAY_STATE_COLUMNS: Final = (
     "frozen_exit_threshold_basis_bp_at_observation",
     "target_price",
     "absolute_price_tick",
+    "frozen_exit_target_price_at_observation",
+    "frozen_exit_absolute_price_tick_at_observation",
     "spot_bid_tick",
     "point_offset",
     "target_location",
@@ -95,6 +107,32 @@ S1_DAY_STATE_COLUMNS: Final = (
     "base_gate_open",
     "ab12_admission_open",
     "gate_reason",
+    "reservation_notional_twd_at_observation",
+    "decision_selected_expected_margin_bp",
+    "decision_economic_status",
+    "decision_economic_reason",
+    "decision_economic_gate_open",
+)
+
+# These are the complete decision outputs projected from the causal 1 Hz
+# panel.  Raw-book changes have their own exact event clock; continuous anchor
+# or margin values therefore do not belong in this panel-relative key once all
+# rounded order prices and gate outcomes are equal.  This key does not assert
+# that the landmark builder and RawBookDayIndex reconstruct identical books;
+# the actual-send raw refresh remains authoritative.
+S1_POLICY_DECISION_SIGNATURE_COLUMNS: Final = (
+    "entry_tod_bucket",
+    "lookup_supported",
+    "lookup_support_reason",
+    "absolute_price_tick",
+    "frozen_exit_absolute_price_tick_at_observation",
+    "reservation_notional_twd_at_observation",
+    "base_gate_open",
+    "ab12_admission_open",
+    "gate_reason",
+    "decision_economic_status",
+    "decision_economic_reason",
+    "decision_economic_gate_open",
 )
 
 
@@ -182,8 +220,19 @@ def build_s1_policy_day_state(
         row["policy_id"] = spec.policy_id
         row.setdefault("lookup_supported", True)
         row.setdefault("lookup_support_reason", "supported")
+        row.setdefault("cost_horizon", "ungated")
+        row.setdefault("safety_floor_bp", None)
+        row.setdefault("economic_gate_enabled", False)
+        row.setdefault("deployment_shortlist_eligible", False)
         spec_rows.append(row)
-    spec_frame = pl.from_dicts(spec_rows, infer_schema_length=None)
+    spec_frame = pl.from_dicts(spec_rows, infer_schema_length=None).with_columns(
+        pl.col("lookup_supported").cast(pl.Boolean),
+        pl.col("lookup_support_reason").cast(pl.String),
+        pl.col("cost_horizon").cast(pl.String),
+        pl.col("safety_floor_bp").cast(pl.Float64),
+        pl.col("economic_gate_enabled").cast(pl.Boolean),
+        pl.col("deployment_shortlist_eligible").cast(pl.Boolean),
+    )
     duplicate = spec_frame.group_by(_CELL_KEYS).len().filter(pl.col("len") != 1)
     if not duplicate.is_empty():
         raise ValueError("PolicySpec cells are duplicated")
@@ -239,6 +288,9 @@ def build_s1_policy_day_state(
     multiplier = (
         1.0 + (pl.col("selected_anchor_bp") + pl.col("upper_distance_bp")) / 10_000.0
     )
+    frozen_exit_multiplier = (
+        1.0 + (pl.col("selected_anchor_bp") - pl.col("lower_distance_bp")) / 10_000.0
+    )
     raw_target = pl.col("fut_exec_bid") / multiplier
     target_geometry_valid = (
         anchor_valid
@@ -256,6 +308,41 @@ def build_s1_policy_day_state(
     target_tick = (
         pl.when(target_geometry_valid)
         .then(price_to_tick_index(target_price, market="spot").round(0))
+        .otherwise(None)
+        .cast(pl.Int64)
+    )
+    future_exit_valid = (
+        pl.col("fut_exec_ask").is_not_null()
+        & pl.col("fut_exec_ask").is_finite()
+        & (pl.col("fut_exec_ask") > 0)
+        & future_valid
+        & (pl.col("fut_exec_bid") <= pl.col("fut_exec_ask"))
+    )
+    frozen_exit_geometry_valid = (
+        anchor_valid
+        & future_exit_valid
+        & frozen_exit_multiplier.is_finite()
+        & (frozen_exit_multiplier > 0)
+    )
+    raw_frozen_exit_target = pl.col("fut_exec_ask") / frozen_exit_multiplier
+    frozen_exit_geometry_valid = (
+        frozen_exit_geometry_valid
+        & raw_frozen_exit_target.is_finite()
+        & (raw_frozen_exit_target > 0)
+    )
+    frozen_exit_target_price = (
+        pl.when(frozen_exit_geometry_valid)
+        .then(round_up_to_tick(raw_frozen_exit_target, market="spot"))
+        .otherwise(None)
+    )
+    frozen_exit_target_tick = (
+        pl.when(frozen_exit_geometry_valid)
+        .then(
+            price_to_tick_index(
+                frozen_exit_target_price,
+                market="spot",
+            ).round(0)
+        )
         .otherwise(None)
         .cast(pl.Int64)
     )
@@ -282,6 +369,10 @@ def build_s1_policy_day_state(
             ),
             target_price.alias("target_price"),
             target_tick.alias("absolute_price_tick"),
+            frozen_exit_target_price.alias("frozen_exit_target_price_at_observation"),
+            frozen_exit_target_tick.alias(
+                "frozen_exit_absolute_price_tick_at_observation"
+            ),
             spot_bid_tick.alias("spot_bid_tick"),
         )
         .with_columns(
@@ -340,6 +431,7 @@ def build_s1_policy_day_state(
             .alias("ab12_admission_open"),
             _gate_reason().alias("gate_reason"),
         )
+        .with_columns(_decision_economic_expressions())
     )
     if _sparse_only:
         result = _thin_s1_policy_state_changes_lazy(result)
@@ -381,9 +473,7 @@ def thin_s1_policy_state_changes(frame: pl.DataFrame) -> pl.DataFrame:
     required = {
         "ValueCode",
         "seconds_from_open",
-        "absolute_price_tick",
-        "base_gate_open",
-        "ab12_admission_open",
+        *S1_POLICY_DECISION_SIGNATURE_COLUMNS,
     }
     _require_columns(frame, required, "S1 policy day state")
     return _thin_s1_policy_state_changes_lazy(frame.lazy()).collect(engine="streaming")
@@ -425,28 +515,185 @@ def weight_s1_policy_state_changes(frame: pl.DataFrame) -> pl.DataFrame:
     return weighted
 
 
+def _decision_economic_expressions() -> tuple[pl.Expr, ...]:
+    """Mirror ``evaluate_s1_entry_economics`` on the causal 1 Hz snapshot.
+
+    Only the selected margin and discrete outcome are materialized.  The raw
+    actual-send refresh remains authoritative.  This panel-relative projection
+    only determines candidate one-second policy wakes; it is not a substitute
+    for validating raw-book reconstruction at those boundaries.
+    """
+
+    profile = _DECISION_COST_PROFILE
+    shares = pl.col("contract_size")
+    entry_spot = pl.col("target_price")
+    exit_spot = pl.col("frozen_exit_target_price_at_observation")
+    entry_future = pl.col("fut_exec_bid")
+    exit_future = pl.col("fut_exec_ask")
+    spot_reference = pl.col("spot_ref_price")
+    spot_bid = pl.col("spot_bid")
+
+    reservation_valid = (
+        pl.col("contract_size_integral")
+        & entry_spot.is_not_null()
+        & entry_spot.is_finite()
+        & (entry_spot > 0)
+    ).fill_null(False)
+    reservation = (
+        pl.when(reservation_valid)
+        .then((entry_spot * shares).ceil())
+        .otherwise(None)
+        .cast(pl.Int64)
+    )
+    economic_inputs_valid = (
+        pl.col("base_gate_open")
+        & reservation_valid
+        & exit_spot.is_not_null()
+        & exit_spot.is_finite()
+        & (exit_spot > 0)
+        & entry_future.is_not_null()
+        & entry_future.is_finite()
+        & (entry_future > 0)
+        & exit_future.is_not_null()
+        & exit_future.is_finite()
+        & (exit_future > 0)
+        & (entry_future <= exit_future)
+        & spot_reference.is_not_null()
+        & spot_reference.is_finite()
+        & (spot_reference > 0)
+        & spot_bid.is_not_null()
+        & spot_bid.is_finite()
+        & (spot_bid > 0)
+        & pl.col("cost_horizon").is_in(("ungated", "same_day", "overnight"))
+        & (
+            (~pl.col("economic_gate_enabled") & pl.col("safety_floor_bp").is_null())
+            | (
+                pl.col("economic_gate_enabled")
+                & pl.col("safety_floor_bp").is_not_null()
+                & pl.col("safety_floor_bp").is_finite()
+                & (pl.col("safety_floor_bp") >= 0)
+            )
+        )
+    ).fill_null(False)
+
+    spot_commission_rate = profile.spot_commission_bp_per_side / 10_000.0
+    spot_tax_rate = profile.spot_sell_tax_bp / 10_000.0
+    future_tax_rate = profile.futures_tax_bp_per_side / 10_000.0
+    spot_entry_commission = entry_spot * shares * spot_commission_rate
+    spot_exit_commission = exit_spot * shares * spot_commission_rate
+    same_day_spot_tax = (
+        exit_spot * shares * spot_tax_rate * profile.same_day_spot_sell_tax_multiplier
+    )
+    overnight_spot_tax = exit_spot * shares * spot_tax_rate
+    future_entry_tax = entry_future * shares * future_tax_rate
+    future_exit_tax = exit_future * shares * future_tax_rate
+    future_entry_commission = pl.lit(profile.futures_commission_twd_per_side)
+    future_exit_commission = pl.lit(profile.futures_commission_twd_per_side)
+    same_day_cost = (
+        spot_entry_commission
+        + spot_exit_commission
+        + same_day_spot_tax
+        + future_entry_tax
+        + future_exit_tax
+        + future_entry_commission
+        + future_exit_commission
+    )
+    overnight_cost = (
+        spot_entry_commission
+        + spot_exit_commission
+        + overnight_spot_tax
+        + future_entry_tax
+        + future_exit_tax
+        + future_entry_commission
+        + future_exit_commission
+    )
+    gross = shares * ((exit_spot - entry_spot) + (entry_future - exit_future))
+    normalization = entry_spot * shares
+    same_day_margin_bp = 10_000.0 * (gross - same_day_cost) / normalization
+    overnight_margin_bp = 10_000.0 * (gross - overnight_cost) / normalization
+    selected_margin_bp = (
+        pl.when(pl.col("cost_horizon") == "same_day")
+        .then(same_day_margin_bp)
+        .when(pl.col("cost_horizon") == "overnight")
+        .then(overnight_margin_bp)
+        .otherwise(None)
+    )
+    exit_passive = exit_spot > spot_bid
+    exit_in_band = (exit_spot > spot_reference * 0.91) & (
+        exit_spot < spot_reference * 1.08
+    )
+    enabled_gate_open = selected_margin_bp > pl.col("safety_floor_bp")
+
+    gate_open = (
+        pl.when(~economic_inputs_valid)
+        .then(None)
+        .when(~pl.col("economic_gate_enabled"))
+        .then(True)
+        .when(~exit_passive)
+        .then(False)
+        .when(~exit_in_band)
+        .then(False)
+        .otherwise(enabled_gate_open)
+        .cast(pl.Boolean)
+    )
+    status = (
+        pl.when(~economic_inputs_valid)
+        .then(None)
+        .when(~pl.col("economic_gate_enabled"))
+        .then(pl.lit("ungated_priced"))
+        .when(~exit_passive | ~exit_in_band)
+        .then(pl.lit("route_ineligible"))
+        .when(enabled_gate_open)
+        .then(pl.lit("eligible"))
+        .otherwise(pl.lit("below_floor"))
+    )
+    reason = (
+        pl.when(~economic_inputs_valid)
+        .then(None)
+        .when(~pl.col("economic_gate_enabled"))
+        .then(pl.lit("ungated_control"))
+        .when(~exit_passive)
+        .then(pl.lit("frozen_exit_target_not_passive"))
+        .when(~exit_in_band)
+        .then(pl.lit("frozen_exit_target_outside_reference_band"))
+        .when(enabled_gate_open)
+        .then(pl.lit("eligible"))
+        .otherwise(pl.lit("expected_margin_not_above_floor"))
+    )
+    return (
+        reservation.alias("reservation_notional_twd_at_observation"),
+        pl.when(economic_inputs_valid)
+        .then(selected_margin_bp)
+        .otherwise(None)
+        .alias("decision_selected_expected_margin_bp"),
+        status.alias("decision_economic_status"),
+        reason.alias("decision_economic_reason"),
+        gate_open.alias("decision_economic_gate_open"),
+    )
+
+
 def _thin_s1_policy_state_changes_lazy(
     frame: pl.LazyFrame,
 ) -> pl.LazyFrame:
     ordered = frame.sort(["ValueCode", "seconds_from_open"])
+    previous_names = {
+        column: f"_prev_decision_{index}"
+        for index, column in enumerate(S1_POLICY_DECISION_SIGNATURE_COLUMNS)
+    }
     with_previous = ordered.with_columns(
         pl.col("seconds_from_open").shift(1).over("ValueCode").alias("_prev_second"),
-        pl.col("absolute_price_tick").shift(1).over("ValueCode").alias("_prev_tick"),
-        pl.col("base_gate_open").shift(1).over("ValueCode").alias("_prev_gate"),
-        pl.col("ab12_admission_open")
-        .shift(1)
-        .over("ValueCode")
-        .alias("_prev_admission"),
+        *(
+            pl.col(column).shift(1).over("ValueCode").alias(previous_names[column])
+            for column in S1_POLICY_DECISION_SIGNATURE_COLUMNS
+        ),
     )
-    changed = (
-        pl.col("_prev_second").is_null()
-        | _different(pl.col("absolute_price_tick"), pl.col("_prev_tick"))
-        | _different(pl.col("base_gate_open"), pl.col("_prev_gate"))
-        | _different(pl.col("ab12_admission_open"), pl.col("_prev_admission"))
-    )
-    return with_previous.filter(changed).drop(
-        "_prev_second", "_prev_tick", "_prev_gate", "_prev_admission"
-    )
+    changed = pl.col("_prev_second").is_null()
+    for column in S1_POLICY_DECISION_SIGNATURE_COLUMNS:
+        changed = changed | _different(
+            pl.col(column),
+            pl.col(previous_names[column]),
+        )
+    return with_previous.filter(changed).drop("_prev_second", *previous_names.values())
 
 
 def _tod_bucket() -> pl.Expr:
@@ -584,6 +831,7 @@ __all__ = [
     "EXIT_STOP_SECOND",
     "S1_COMMON_STATE_COLUMNS",
     "S1_DAY_STATE_COLUMNS",
+    "S1_POLICY_DECISION_SIGNATURE_COLUMNS",
     "SESSION_END_SECOND",
     "SESSION_START_SECOND",
     "build_s1_policy_day_state",

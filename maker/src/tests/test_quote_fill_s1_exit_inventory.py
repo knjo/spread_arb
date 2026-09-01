@@ -203,6 +203,211 @@ class S1ExitInventoryControllerTests(unittest.TestCase):
         self.assertEqual(state.positions[0].allocation_kind, "working")
         state.verify()
 
+    def test_candidate_identity_ignores_global_sibling_effect_rows(self) -> None:
+        states = (controller(), controller())
+        effect_cursors = (
+            EventCursor(10, 150, 3),
+            EventCursor(10, 150, 1),
+        )
+
+        added = tuple(
+            state.add_paired_position(
+                position_fact("p"),
+                absolute_target_tick=100,
+                cursor=effect_cursor,
+            )
+            for state, effect_cursor in zip(states, effect_cursors, strict=True)
+        )
+        first_commands = tuple(fact.commands[0] for fact in added)
+        self.assertNotEqual(first_commands[0].cursor, first_commands[1].cursor)
+        self.assertEqual(
+            first_commands[0].candidate_intent_id,
+            first_commands[1].candidate_intent_id,
+        )
+        self.assertEqual(first_commands[0].request_id, first_commands[1].request_id)
+        self.assertEqual(
+            states[0].pending_orders[0].intent_cursor,
+            EventCursor(10, 150, 0),
+        )
+        self.assertEqual(
+            states[0].pending_orders[0].intent_cursor,
+            states[1].pending_orders[0].intent_cursor,
+        )
+
+        raw_ids = tuple(
+            assign_and_send(
+                state,
+                assigned_cursor=EventCursor(10, 600, 1),
+                sent_cursor=EventCursor(10, 700, 1),
+            )
+            for state in states
+        )
+        self.assertEqual(raw_ids[0], raw_ids[1])
+        for state in states:
+            state.verify()
+
+    def test_noop_reconcile_does_not_shift_later_candidate_identity(self) -> None:
+        states = (controller(), controller())
+        for state in states:
+            state.add_paired_position(
+                position_fact("p"),
+                absolute_target_tick=100,
+                cursor=cursor(2),
+            )
+            state.set_position_desired(
+                "p",
+                absolute_target_tick=None,
+                desired_shares=0,
+                cursor=EventCursor(10, 150, 1),
+            )
+
+        noop = states[1].set_position_desired(
+            "p",
+            absolute_target_tick=None,
+            desired_shares=0,
+            cursor=EventCursor(10, 150, 2),
+        )
+        self.assertEqual(noop.commands, ())
+        reopened = (
+            states[0].set_position_desired(
+                "p",
+                absolute_target_tick=100,
+                desired_shares=1000,
+                cursor=EventCursor(10, 150, 2),
+            ),
+            states[1].set_position_desired(
+                "p",
+                absolute_target_tick=100,
+                desired_shares=1000,
+                cursor=EventCursor(10, 150, 3),
+            ),
+        )
+
+        commands = tuple(fact.commands[0] for fact in reopened)
+        self.assertNotEqual(commands[0].cursor, commands[1].cursor)
+        self.assertEqual(
+            commands[0].candidate_intent_id, commands[1].candidate_intent_id
+        )
+        self.assertEqual(commands[0].request_id, commands[1].request_id)
+        self.assertEqual(
+            states[0].pending_orders[0].intent_cursor,
+            EventCursor(10, 150, 0),
+        )
+        self.assertEqual(
+            states[0].pending_orders[0].intent_cursor,
+            states[1].pending_orders[0].intent_cursor,
+        )
+        for state in states:
+            state.verify()
+
+    def test_same_phase_reopen_gets_distinct_product_local_emission_rows(self) -> None:
+        state = controller()
+        first = state.add_paired_position(
+            position_fact("p"),
+            absolute_target_tick=100,
+            cursor=EventCursor(10, 150, 4),
+        )
+        first_candidate = first.commands[0].candidate_intent_id
+
+        state.set_position_desired(
+            "p",
+            absolute_target_tick=None,
+            desired_shares=0,
+            cursor=EventCursor(10, 150, 6),
+        )
+        reopened = state.set_position_desired(
+            "p",
+            absolute_target_tick=100,
+            desired_shares=1000,
+            cursor=EventCursor(10, 150, 9),
+        )
+        second_candidate = reopened.commands[0].candidate_intent_id
+        state.set_position_desired(
+            "p",
+            absolute_target_tick=None,
+            desired_shares=0,
+            cursor=EventCursor(10, 150, 10),
+        )
+        reopened_again = state.set_position_desired(
+            "p",
+            absolute_target_tick=100,
+            desired_shares=1000,
+            cursor=EventCursor(10, 150, 11),
+        )
+        third_candidate = reopened_again.commands[0].candidate_intent_id
+
+        self.assertEqual(len({first_candidate, second_candidate, third_candidate}), 3)
+        self.assertEqual(
+            state.pending_orders[0].intent_cursor,
+            EventCursor(10, 150, 2),
+        )
+        state.verify()
+
+    def test_prefix_replay_reconstructs_next_candidate_emission_identity(self) -> None:
+        state = controller()
+        state.add_paired_position(
+            position_fact("p"),
+            absolute_target_tick=100,
+            cursor=EventCursor(10, 150, 2),
+        )
+        state.set_position_desired(
+            "p",
+            absolute_target_tick=None,
+            desired_shares=0,
+            cursor=EventCursor(10, 150, 4),
+        )
+        state.set_position_desired(
+            "p",
+            absolute_target_tick=None,
+            desired_shares=0,
+            cursor=EventCursor(10, 150, 5),
+        )
+        replayed = replay_exit_inventory_facts(
+            state.facts,
+            Date=state.Date,
+            ValueCode=state.ValueCode,
+            QuoteCode=state.QuoteCode,
+            scenario_id=state.scenario_id,
+        )
+
+        expected = state.set_position_desired(
+            "p",
+            absolute_target_tick=100,
+            desired_shares=1000,
+            cursor=EventCursor(10, 150, 8),
+        )
+        actual = replayed.set_position_desired(
+            "p",
+            absolute_target_tick=100,
+            desired_shares=1000,
+            cursor=EventCursor(10, 150, 8),
+        )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            actual.commands[0].request_id,
+            expected.commands[0].request_id,
+        )
+        state.verify()
+        replayed.verify()
+
+    def test_candidate_emission_counter_is_committed_by_state_digest(self) -> None:
+        state = controller()
+        state.add_paired_position(
+            position_fact("p"),
+            absolute_target_tick=100,
+            cursor=EventCursor(10, 150, 4),
+        )
+        state.verify()
+
+        state._candidate_emission_next_row_by_tick[100] += 1
+
+        with self.assertRaisesRegex(
+            ExitInventoryReplayError,
+            "final state does not match",
+        ):
+            state.verify()
+
     def test_same_price_position_join_cancel_replaces_whole_aggregate(self) -> None:
         state = controller()
         state.add_paired_position(

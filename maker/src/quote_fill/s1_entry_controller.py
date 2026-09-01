@@ -182,10 +182,22 @@ class S1EntryController:
         base_gate_open: bool,
         admission_open: bool,
         gate_reason: str = "base_gate_closed",
+        candidate_intent_cursor: EventCursor | None = None,
     ) -> tuple[EntryControllerCommand, ...]:
-        """Reconcile the latest desired absolute price into request commands."""
+        """Reconcile the latest desired absolute price into request commands.
+
+        ``cursor`` remains the causal controller/scheduler effect cursor.  The
+        optional ``candidate_intent_cursor`` is a product-local logical cursor
+        used only when this observation creates a candidate identity.  Keeping
+        those clocks separate prevents an unrelated product's same-phase
+        effect row from changing this product's pre-send physical intent ID.
+        """
 
         self._validate_next_cursor(cursor)
+        identity_cursor = self._candidate_intent_cursor(
+            cursor,
+            candidate_intent_cursor,
+        )
         if self._cutoff:
             raise RuntimeError("cannot observe after cutoff")
         if not isinstance(base_gate_open, bool) or not isinstance(admission_open, bool):
@@ -235,7 +247,14 @@ class S1EntryController:
             elif previous_target == target and not previous_admission:
                 reason = "became_admission_eligible"
         if reason is not None:
-            commands.append(self._enqueue_new(cursor, target, reason))
+            commands.append(
+                self._enqueue_new(
+                    cursor,
+                    target,
+                    reason,
+                    candidate_intent_cursor=identity_cursor,
+                )
+            )
 
         self._current_target_tick = target
         self._gate_open = True
@@ -424,14 +443,23 @@ class S1EntryController:
         return tuple(terminals), tuple(commands)
 
     def _enqueue_new(
-        self, cursor: EventCursor, tick: int, reason: str
+        self,
+        cursor: EventCursor,
+        tick: int,
+        reason: str,
+        *,
+        candidate_intent_cursor: EventCursor | None = None,
     ) -> EntryControllerCommand:
         if self._pending_new is not None:
             raise RuntimeError("only one unsent desired new may exist")
-        intent_id = candidate_intent_id(
-            **self._identity_fields(tick), intent_cursor=cursor
+        identity_cursor = self._candidate_intent_cursor(
+            cursor,
+            candidate_intent_cursor,
         )
-        self._pending_new = _PendingNew(intent_id, tick, cursor)
+        intent_id = candidate_intent_id(
+            **self._identity_fields(tick), intent_cursor=identity_cursor
+        )
+        self._pending_new = _PendingNew(intent_id, tick, identity_cursor)
         return self._command(
             "enqueue_new",
             f"{intent_id}/new",
@@ -441,6 +469,26 @@ class S1EntryController:
             intent_id,
             None,
         )
+
+    @staticmethod
+    def _candidate_intent_cursor(
+        effect_cursor: EventCursor,
+        candidate_intent_cursor: EventCursor | None,
+    ) -> EventCursor:
+        if candidate_intent_cursor is None:
+            return effect_cursor
+        if not isinstance(candidate_intent_cursor, EventCursor):
+            raise TypeError("candidate_intent_cursor must be an EventCursor or None")
+        if (
+            candidate_intent_cursor.recv_time_ns != effect_cursor.recv_time_ns
+            or candidate_intent_cursor.event_sequence != effect_cursor.event_sequence
+        ):
+            raise ValueError(
+                "candidate_intent_cursor must share the effect timestamp and phase"
+            )
+        if candidate_intent_cursor > effect_cursor:
+            raise ValueError("candidate_intent_cursor cannot follow the effect cursor")
+        return candidate_intent_cursor
 
     def _withdraw_pending_new(
         self, cursor: EventCursor, status: UnsentReason

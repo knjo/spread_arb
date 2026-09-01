@@ -1,8 +1,12 @@
 # S1 暫停與交接摘要（2026-09-01，歷史快照）
 
-> 本文保存commit `944c0ac`第一次smoke失敗與當時清理狀態。研究其後已恢復；2354事件鏈已完成診斷並由exit risk guard承接，但新clean-source smoke仍待執行。本文不是目前的「暫停」指令。
+> 本文保存commit `944c0ac`第一次smoke失敗與當時清理狀態。研究從未因本文暫停；停止的是該次失敗程序。
+> 後續`42b689a`／`cd2b87c`已承接2354事件鏈，`cd2b87c`的2026-05-05 control smoke成功且
+> `unresolved=0`。v3正式bundle目前為1/497；第二個generic-clock partition沒有complete marker。
+> v4 precommit integration、post-commit durable rerun與production進度只在[`S1_COST_AWARE_IMPLEMENTATION_20260831.md`](S1_COST_AWARE_IMPLEMENTATION_20260831.md)維護；本文不是目前的
+> 「暫停」指令，也不是目前head的執行狀態。
 
-## 現在狀態
+## 當時狀態（commit `944c0ac`）
 
 - 當時S1執行程序已停止；沒有遺留的`s1_production_runner`、相關測試或背景replay程序。
 - 成本化 S1 實作已提交於 `944c0ac`（`feat(maker): rebuild S1 as cost-aware executable screen`）。
@@ -12,8 +16,8 @@
 
 - 七組 cost-aware policy、交易成本 gate、20M 全域／10M 單商品 cap、B6 hedge 定價、凍結 exit 目標、共同時點未平倉估值與 publication gate 已實作。
 - Spot 與 makerFill 的來源可依 storage contract 轉到 SSD2；個股期貨維持 NAS 並禁止用 TXF 替代。
-- Headroom guard修正後全套S1測試365項、路徑contract測試19項通過；新clean-source commit仍須在smoke前重跑完整preflight。
-- nested repository 在啟動 smoke 前為乾淨狀態。
+- 後續headroom guard修正的全套S1測試365項、路徑contract測試19項通過；這是`cd2b87c`前後的後記，不是`944c0ac`當時已完成項。
+- nested repository 在當次smoke前為乾淨狀態。
 
 ## 單 partition smoke 結果
 
@@ -58,4 +62,6 @@ Spot rollback都timeout，形成`exit_rollback_failed_unresolved`。
 3. 任何最後仍是裸腿的position繼續保留exposure與capacity並封鎖排名；不能用common-horizon mark、最後合法book或expiry basis=0補平。
 
 這些guard只修正2354揭露的可辨識上緣邊界風險，不宣稱同步book消失、cancel latency或實盤reject下絕不會裸腿；
-任何unresolved仍維持fail closed。下一步是用新clean source commit重跑單partition smoke；通過後才啟動完整497 partitions。
+任何unresolved仍維持fail closed。這份歷史快照當時的下一步是用新clean source commit重跑單partition smoke；
+該步其後已由`cd2b87c`完成。後續v4 clock、differential、preflight與執行進度不在此歷史快照更新，統一以
+[`S1_COST_AWARE_IMPLEMENTATION_20260831.md`](S1_COST_AWARE_IMPLEMENTATION_20260831.md)為準。

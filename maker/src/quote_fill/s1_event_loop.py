@@ -553,6 +553,7 @@ class EntryObservation:
     frozen_exit_target_price: float | None = None
     frozen_exit_absolute_price_tick: int | None = None
     base_gate_book_wake_venues: frozenset[Venue] = frozenset()
+    policy_state_signature: tuple[object, ...] | None = None
 
     def __post_init__(self) -> None:
         _cursor(self.source_cursor, "source_cursor")
@@ -625,6 +626,11 @@ class EntryObservation:
             raise ValueError("base-gate book wakes must name spot or future")
         if self.base_gate_open and self.base_gate_book_wake_venues:
             raise ValueError("open base gate cannot request a base-gate book wake")
+        if self.policy_state_signature is not None and (
+            not isinstance(self.policy_state_signature, tuple)
+            or not self.policy_state_signature
+        ):
+            raise TypeError("policy_state_signature must be a non-empty tuple or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,7 +828,10 @@ class RiskBookAdapter(Protocol):
     ``next_change_cursor`` must return the earliest state transition after the
     supplied cursor, including TrialMatch invalidation and the later formal
     reopen as separate changes.  It returns ``None`` only when no transition
-    exists through the inclusive deadline.
+    exists through the inclusive deadline.  Implementations may additionally
+    expose ``next_entry_quote_change_cursor``; the economic-gate scheduler
+    uses that exact route-derived clock when available and otherwise falls
+    back to the generic state clock.
     """
 
     def state_as_of(
@@ -1138,6 +1147,7 @@ class S1ReplayResult:
     expiry_marks: tuple[S1ExpiryMarkSummary, ...] = ()
     expiry_mark_count: int = 0
     suppressed_redundant_blocked_admission_probes: int = 0
+    reused_incidental_cap_blocked_entry_states: int = 0
     exit_desired_withdrawal_reason_counts: tuple[tuple[str, int], ...] = ()
     exit_cutoff_applied: bool = False
     exit_drain_barrier_applied: bool = False
@@ -1261,6 +1271,20 @@ class _BlockedAdmissionSleep:
     admission_inputs: tuple[object, ...]
     global_committed_twd: int
     product_committed_twd: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CapBlockedEntryMonitor:
+    """Persistent product intent retained after one exact C9 denial.
+
+    ``denied_request_id`` is provenance only.  The monitor deliberately
+    survives a raw pre-send coalesce that withdraws that request: the same
+    unchanged policy observation may become sendable again on a later raw
+    route-state change or capacity release.
+    """
+
+    policy_generation: int
+    denied_request_id: str
 
 
 class S1EventLoop:
@@ -1541,12 +1565,36 @@ class S1EventLoop:
         self._timeline: list[int] = []
         self._scheduled_times: set[int] = set()
         self._new_probe_products: dict[int, set[str]] = defaultdict(set)
+        self._entry_raw_probe_generations: dict[
+            int, dict[str, set[int]]
+        ] = defaultdict(lambda: defaultdict(set))
+        self._entry_raw_generation: dict[str, int] = {
+            product_id: 0 for product_id in self.products
+        }
+        self._entry_policy_generation: dict[str, int] = {
+            product_id: 0 for product_id in self.products
+        }
+        self._last_external_policy_signature: dict[
+            str, tuple[object, ...]
+        ] = {}
+        self._last_applied_entry_signature: dict[
+            str, tuple[object, ...] | None
+        ] = {product_id: None for product_id in self.products}
+        self._cap_blocked_entry_products: dict[
+            str, _CapBlockedEntryMonitor
+        ] = {}
+        self._active_entry_probe_timestamp_ns: int | None = None
+        self._active_entry_probe_products: set[str] = set()
         self._blocked_admission_sleep: dict[str, _BlockedAdmissionSleep] = {}
         self._suppress_redundant_blocked_admission_probes = (
             suppress_redundant_blocked_admission_probes
         )
         self._suppressed_redundant_blocked_admission_probes = 0
+        self._reused_incidental_cap_blocked_entry_states = 0
         self._phase_rows: dict[int, int] = defaultdict(int)
+        self._entry_candidate_intent_rows: dict[tuple[str, int], int] = defaultdict(
+            int
+        )
         self._current_time_ns: int | None = None
         self._last_processed_time_ns: int | None = None
         self._cutoff_applied = False
@@ -1739,6 +1787,9 @@ class S1EventLoop:
             suppressed_redundant_blocked_admission_probes=(
                 self._suppressed_redundant_blocked_admission_probes
             ),
+            reused_incidental_cap_blocked_entry_states=(
+                self._reused_incidental_cap_blocked_entry_states
+            ),
             exit_desired_withdrawal_reason_counts=tuple(
                 sorted(self._exit_desired_withdrawal_reasons.items())
             ),
@@ -1758,6 +1809,9 @@ class S1EventLoop:
             raise RuntimeError("loop timestamp failed to advance")
         self._current_time_ns = timestamp_ns
         self._phase_rows.clear()
+        self._entry_candidate_intent_rows.clear()
+        self._active_entry_probe_timestamp_ns = None
+        self._active_entry_probe_products.clear()
         expiry_at_timestamp = self._process_external(timestamp_ns, external)
         self._expiry_due = self._expiry_due or expiry_at_timestamp
         self._refresh_actual_send_state(timestamp_ns)
@@ -1768,7 +1822,9 @@ class S1EventLoop:
         self._process_fills(timestamp_ns)
         released = self._process_marketables(timestamp_ns, assigned_risk)
         self._process_entry_settlements(timestamp_ns)
-        self._process_contract_expiry_settlements(timestamp_ns)
+        released = (
+            self._process_contract_expiry_settlements(timestamp_ns) or released
+        )
         released = self._process_cancels(timestamp_ns, assigned_cancel) or released
         if expiry_at_timestamp:
             released = self._process_expiry(timestamp_ns) or released
@@ -1786,14 +1842,18 @@ class S1EventLoop:
         if self._exit_drain_barrier_due:
             self._assert_exit_drain_barrier(timestamp_ns)
             self._exit_drain_barrier_due = False
-        if released and self._has_pending_entry_new():
+        retry_products = set(self._pending_entry_product_ids()).union(
+            self._active_cap_blocked_entry_product_ids()
+        )
+        if released and retry_products:
             retry_time_ns = timestamp_ns + CAP_RETRY_DELAY_NS
-            self._new_probe_products[retry_time_ns].update(
-                self._pending_entry_product_ids()
-            )
+            self._new_probe_products[retry_time_ns].update(retry_products)
             self._schedule_time(retry_time_ns)
         self._schedule_token_wakes(timestamp_ns)
         self._new_probe_products.pop(timestamp_ns, None)
+        self._entry_raw_probe_generations.pop(timestamp_ns, None)
+        self._active_entry_probe_timestamp_ns = None
+        self._active_entry_probe_products.clear()
         self._last_processed_time_ns = timestamp_ns
         self._current_time_ns = None
 
@@ -1836,6 +1896,42 @@ class S1EventLoop:
                     or event.product_id in self._contract_expired_product_ids
                 ):
                     continue
+                product_id = event.product_id
+                policy_signature = self._entry_policy_signature(event)
+                prior_policy_signature = self._last_external_policy_signature.get(
+                    product_id
+                )
+                policy_changed = policy_signature != prior_policy_signature
+                if policy_changed:
+                    prior_monitor = self._cap_blocked_entry_products.get(product_id)
+                    self._last_external_policy_signature[product_id] = policy_signature
+                    self._entry_policy_generation[product_id] += 1
+                    self._clear_cap_blocked_entry_product(
+                        product_id,
+                        invalidate_raw_wakes=False,
+                    )
+                    if prior_monitor is not None:
+                        self._blocked_admission_sleep.pop(
+                            prior_monitor.denied_request_id,
+                            None,
+                        )
+                elif event.policy_state_signature is not None:
+                    # A full 1 Hz panel may contain rows that sparse replay
+                    # removes.  Its persisted panel signature, not a newly
+                    # resolved raw snapshot, defines whether this is a new
+                    # quote intent.  Exact raw evolution is owned by the
+                    # generation-aware route clock below.
+                    continue
+
+                applied_signature = self._entry_applied_signature(event)
+                applied_changed = (
+                    applied_signature
+                    != self._last_applied_entry_signature[product_id]
+                )
+                if policy_changed or applied_changed:
+                    self._advance_entry_raw_generation(product_id)
+                    self._last_applied_entry_signature[product_id] = applied_signature
+
                 cursor = self._effect_cursor(timestamp_ns, PHASE_OBSERVE)
                 commands = self.controllers[event.product_id].observe(
                     cursor,
@@ -1843,22 +1939,31 @@ class S1EventLoop:
                     base_gate_open=event.base_gate_open,
                     admission_open=event.admission_open,
                     gate_reason=event.gate_reason,
+                    candidate_intent_cursor=self._entry_candidate_intent_cursor(
+                        event.product_id,
+                        timestamp_ns,
+                        PHASE_OBSERVE,
+                    ),
                 )
                 self._apply_commands(event.product_id, commands)
-                if (
-                    self.controllers[event.product_id].pending_candidate_intent_id
-                    is not None
-                ):
-                    self._new_probe_products[timestamp_ns].add(event.product_id)
-                self._schedule_next_economic_gate_change(
-                    event,
-                    after_cursor=event.source_cursor,
-                )
+                if policy_changed and self._has_pending_entry_new({product_id}):
+                    # A true sparse policy supersession can change reservation
+                    # or frozen-exit state while leaving the controller's entry
+                    # tick/base/admission tuple unchanged.  Re-evaluate the
+                    # still-pending request now so a C9 denial is rebound to the
+                    # new policy generation and retains its own raw wake chain.
+                    self._new_probe_products[timestamp_ns].add(product_id)
+                if policy_changed or applied_changed:
+                    self._schedule_next_entry_raw_change(
+                        event,
+                        after_cursor=event.source_cursor,
+                    )
                 continue
             if isinstance(event, EntryCutoff):
                 if self._cutoff_applied:
                     raise ValueError("entry cutoff appears more than once")
                 self._cutoff_applied = True
+                self._clear_all_cap_blocked_entry_products()
                 for product_id in sorted(self.controllers):
                     if product_id in self._contract_expired_product_ids:
                         continue
@@ -1887,28 +1992,46 @@ class S1EventLoop:
                 raise TypeError("unsupported external event")
             if self._expiry_applied or expiry:
                 raise ValueError("session expiry appears more than once")
+            self._clear_all_cap_blocked_entry_products()
             expiry = True
         if contract_expiry_replay is not None:
-            # Validate every release in the batch before accounting marks are
-            # emitted in the settlement phase.  This keeps the verification
-            # cost constant in the number of expiring products.
+            # Validate the common pre-expiry replay once.  Capacity mutation is
+            # deferred until settlement, after this timestamp's entry
+            # assignments, so admission cannot consume same-cursor expiry
+            # release.
             self._ledger.verify()
         return expiry
 
     def _refresh_actual_send_state(self, timestamp_ns: int) -> None:
-        if (
-            self._cutoff_applied
-            or self._expiry_due
-            or not self._new_probe_products.get(timestamp_ns)
-        ):
+        if self._cutoff_applied or self._expiry_due:
             return
         assignment_cursor = EventCursor(timestamp_ns, PHASE_ASSIGN, 0)
-        probe_products = self._entry_probe_products_at(timestamp_ns)
+        explicitly_triggered = self._entry_triggered_products_at(timestamp_ns)
+        probe_products = self._entry_probe_products_at(
+            timestamp_ns,
+            triggered=explicitly_triggered,
+        )
+        self._active_entry_probe_timestamp_ns = timestamp_ns
+        self._active_entry_probe_products = set(probe_products)
+        if not probe_products:
+            return
         for product_id in sorted(probe_products):
+            if (
+                product_id not in explicitly_triggered
+                and self._can_reuse_incidental_cap_blocked_entry_state(product_id)
+            ):
+                # The product participates in venue-wide priority traversal, but
+                # its own policy/raw clock and both committed balances prove the
+                # previous C9 denial is still the same decision.  Keeping its
+                # generation intact also preserves the already-scheduled own
+                # raw wake instead of multiplying it at every sibling wake.
+                self._reused_incidental_cap_blocked_entry_states += 1
+                continue
             state = self.entry_state_adapter.current_state(
                 product_id,
                 assignment_cursor,
             )
+            self._advance_entry_raw_generation(product_id)
             if state is not None:
                 if not isinstance(state, EntryObservation):
                     raise TypeError(
@@ -1931,65 +2054,131 @@ class S1EventLoop:
                     base_gate_open=state.base_gate_open,
                     admission_open=state.admission_open,
                     gate_reason=state.gate_reason,
+                    candidate_intent_cursor=self._entry_candidate_intent_cursor(
+                        product_id,
+                        timestamp_ns,
+                        PHASE_PRE_SEND_REFRESH,
+                    ),
                 )
                 self._apply_commands(product_id, commands)
-                self._schedule_next_economic_gate_change(
+                self._last_applied_entry_signature[product_id] = (
+                    self._entry_applied_signature(state)
+                )
+                self._schedule_next_entry_raw_change(
                     state,
                     after_cursor=assignment_cursor,
                 )
+            elif product_id in self._active_cap_blocked_entry_product_ids():
+                self._schedule_entry_raw_changes(
+                    product_id,
+                    ((SPOT, True), (FUTURE, True)),
+                    after_cursor=assignment_cursor,
+                )
+                self._last_applied_entry_signature[product_id] = None
             self._actual_state[product_id] = state
 
-    def _schedule_next_economic_gate_change(
+    def _schedule_next_entry_raw_change(
         self,
         state: EntryObservation,
         *,
         after_cursor: EventCursor,
     ) -> None:
-        """Wake a book-blocked candidate on its next relevant causal change.
+        """Wake a raw blocker or persistent C9 monitor on its next change.
 
-        Sparse policy observations deliberately omit unchanged target/AB state.
-        A cost gate can reopen when either executable leg changes.  A base gate
-        closed specifically by an unavailable or illegal raw book can likewise
-        recover, but only the venue recorded by the state resolver is queried.
-        Ordinary closed base/AB states continue to rely on the policy stream.
+        The C9 monitor is intentionally product-level rather than request-level:
+        an exact raw retreat may coalesce the denied request before a later raw
+        recovery recreates it.  Entry-route clocks are sufficient for cost,
+        AB1/2, passivity, reference-band, and monitored pending state.  Existing
+        base-book recovery keeps the conservative generic-clock fallback.
         """
 
-        adapter = self.risk_book_adapter
         if after_cursor < state.source_cursor:
             raise ValueError("entry-gate wake cursor precedes its observed state")
+        if self.risk_book_adapter is None or self._cutoff_applied or self._expiry_due:
+            return
+
+        product_id = state.product_id
+        if product_id in self._active_cap_blocked_entry_product_ids():
+            wake_plan: tuple[tuple[Venue, bool], ...] = (
+                (SPOT, True),
+                (FUTURE, True),
+            )
+        elif state.admission_open:
+            return
+        elif (
+            state.base_gate_open
+            and (
+                state.gate_reason.startswith("economic_gate:")
+                or state.gate_reason == "target_not_exact_raw_bid1_bid2"
+            )
+        ) or (
+            not state.base_gate_open and state.gate_reason == "target_not_passive"
+        ):
+            wake_plan = ((SPOT, True), (FUTURE, True))
+        elif (
+            not state.base_gate_open
+            and state.gate_reason == "target_outside_reference_band"
+        ):
+            wake_plan = ((FUTURE, True),)
+        else:
+            wake_plan = tuple(
+                (venue, False)
+                for venue in sorted(state.base_gate_book_wake_venues)
+            )
+        self._schedule_entry_raw_changes(
+            product_id,
+            wake_plan,
+            after_cursor=after_cursor,
+        )
+
+    def _schedule_entry_raw_changes(
+        self,
+        product_id: str,
+        wake_plan: Sequence[tuple[Venue, bool]],
+        *,
+        after_cursor: EventCursor,
+    ) -> None:
+        adapter = self.risk_book_adapter
         if (
             adapter is None
             or self._cutoff_applied
             or self._expiry_due
-            or state.admission_open
+            or not wake_plan
         ):
             return
-        if state.base_gate_open:
-            if not state.gate_reason.startswith("economic_gate:"):
-                return
-            wake_venues: tuple[Venue, ...] = (SPOT, FUTURE)
-        else:
-            wake_venues = tuple(sorted(state.base_gate_book_wake_venues))
-            if not wake_venues:
-                return
-        product = self.products[state.product_id]
+        product = self.products[product_id]
         deadline_ns = min(
             product.spot_session_end_time_ns,
             product.future_session_end_time_ns,
         )
-        for venue in wake_venues:
-            candidate = adapter.next_change_cursor(
-                venue,
-                state.product_id,
-                after_cursor,
-                deadline_ns,
+        generation = self._entry_raw_generation[product_id]
+        for venue, prefer_entry_clock in wake_plan:
+            entry_quote_change = getattr(
+                adapter,
+                "next_entry_quote_change_cursor",
+                None,
             )
+            if prefer_entry_clock and callable(entry_quote_change):
+                candidate = entry_quote_change(
+                    venue,
+                    product_id,
+                    after_cursor,
+                    deadline_ns,
+                )
+                query_name = "next_entry_quote_change_cursor"
+            else:
+                candidate = adapter.next_change_cursor(
+                    venue,
+                    product_id,
+                    after_cursor,
+                    deadline_ns,
+                )
+                query_name = "next_change_cursor"
             if candidate is None:
                 continue
             if not isinstance(candidate, EventCursor):
                 raise TypeError(
-                    "RiskBookAdapter.next_change_cursor must return "
-                    "EventCursor or None"
+                    f"RiskBookAdapter.{query_name} must return EventCursor or None"
                 )
             if candidate <= after_cursor:
                 raise ValueError("next entry-gate book change must follow its query")
@@ -1997,7 +2186,9 @@ class S1EventLoop:
                 raise ValueError("next entry-gate book change must be a raw cursor")
             if candidate.recv_time_ns > deadline_ns:
                 raise ValueError("next entry-gate book change exceeds session deadline")
-            self._new_probe_products[candidate.recv_time_ns].add(state.product_id)
+            self._entry_raw_probe_generations[candidate.recv_time_ns][
+                product_id
+            ].add(generation)
             self._schedule_time(candidate.recv_time_ns)
 
     def _process_contract_expiry(
@@ -2100,6 +2291,11 @@ class S1EventLoop:
             self._apply_exit_inventory_fact(product_id, callback)
 
         self._contract_expired_product_ids.add(product_id)
+        self._advance_entry_raw_generation(product_id)
+        self._clear_cap_blocked_entry_product(
+            product_id,
+            invalidate_raw_wakes=False,
+        )
         self._exit_activations = {
             position_id: activation
             for position_id, activation in self._exit_activations.items()
@@ -2109,12 +2305,30 @@ class S1EventLoop:
             active_positions,
             key=lambda value: self._required_position_fact(value.position_id).fifo_key,
         ):
-            cursor = self._effect_cursor(timestamp_ns, PHASE_OBSERVE)
             transition_id = (
                 f"{position.capacity_id}/expiry-basis-zero/{self.config.date}"
             )
+            self._expiry_settlements.append(
+                _ExpirySettlement(
+                    position_id=position.position_id,
+                    product_id=product_id,
+                    capacity_release_transition_id=transition_id,
+                    close=close,
+                )
+            )
+        return replay
+
+    def _process_contract_expiry_settlements(self, timestamp_ns: int) -> bool:
+        pending = tuple(self._expiry_settlements)
+        self._expiry_settlements.clear()
+        adapter = self.accounting_adapter
+        if pending and adapter is None:
+            raise RuntimeError("contract expiry settlement lost accounting adapter")
+        for settlement in pending:
+            position = self._positions[settlement.position_id]
+            cursor = self._effect_cursor(timestamp_ns, PHASE_SETTLEMENT)
             self._ledger.complete_expiry_basis_zero(
-                transition_id=transition_id,
+                transition_id=settlement.capacity_release_transition_id,
                 timestamp_ns=cursor.recv_time_ns,
                 event_sequence=cursor.event_sequence,
                 row_index=cursor.row_index,
@@ -2130,22 +2344,6 @@ class S1EventLoop:
                 "official_spot_close_basis_zero",
                 stage=EXIT_STAGE,
             )
-            self._expiry_settlements.append(
-                _ExpirySettlement(
-                    position_id=position.position_id,
-                    product_id=product_id,
-                    capacity_release_transition_id=transition_id,
-                    close=close,
-                )
-            )
-        return replay
-
-    def _process_contract_expiry_settlements(self, timestamp_ns: int) -> None:
-        pending = tuple(self._expiry_settlements)
-        self._expiry_settlements.clear()
-        adapter = self.accounting_adapter
-        if pending and adapter is None:
-            raise RuntimeError("contract expiry settlement lost accounting adapter")
         for settlement in pending:
             assert adapter is not None
             close = settlement.close
@@ -2206,6 +2404,7 @@ class S1EventLoop:
                     spot_close_price=close.close_price,
                 )
             )
+        return bool(pending)
 
     def _refresh_exit_desired(self, timestamp_ns: int) -> None:
         if not self.normal_exit_enabled:
@@ -3270,14 +3469,28 @@ class S1EventLoop:
             state = frozen_new_state[value.plan.request_id]
             if value.plan.admitted:
                 self._blocked_admission_sleep.pop(value.plan.request_id, None)
-            elif self._suppress_redundant_blocked_admission_probes:
-                self._blocked_admission_sleep[value.plan.request_id] = (
-                    self._blocked_admission_sleep_value(
-                        value.plan.request_id,
-                        value.plan.product_id,
-                        value.plan.capacity_id,
-                        state,
+                self._clear_cap_blocked_entry_product(value.plan.product_id)
+            else:
+                self._cap_blocked_entry_products[value.plan.product_id] = (
+                    _CapBlockedEntryMonitor(
+                        policy_generation=self._entry_policy_generation[
+                            value.plan.product_id
+                        ],
+                        denied_request_id=value.plan.request_id,
                     )
+                )
+                if self._suppress_redundant_blocked_admission_probes:
+                    self._blocked_admission_sleep[value.plan.request_id] = (
+                        self._blocked_admission_sleep_value(
+                            value.plan.request_id,
+                            value.plan.product_id,
+                            value.plan.capacity_id,
+                            state,
+                        )
+                    )
+                self._schedule_next_entry_raw_change(
+                    state,
+                    after_cursor=assignment_cursor,
                 )
 
         assigned_new: list[_AssignedNew | _AssignedExitNew] = []
@@ -4622,6 +4835,7 @@ class S1EventLoop:
                 cursor,
                 "new_working",
             )
+            self._clear_cap_blocked_entry_product(binding.product_id)
             self._request_bindings.pop(value.assignment.request_id, None)
             potential = self.fill_adapter.potential_fill(order, snapshot)
             if potential is None:
@@ -5424,15 +5638,44 @@ class S1EventLoop:
             for binding in self._request_bindings.values()
         )
 
-    def _entry_probe_products_at(self, timestamp_ns: int) -> set[str]:
-        triggered = self._new_probe_products.get(timestamp_ns)
-        if not triggered:
+    def _entry_triggered_products_at(self, timestamp_ns: int) -> set[str]:
+        pending = set(self._pending_entry_product_ids())
+        monitored = self._active_cap_blocked_entry_product_ids()
+        normal_triggered = set(self._new_probe_products.get(timestamp_ns, ()))
+        normal_triggered.intersection_update(pending.union(monitored))
+        raw_triggered = {
+            product_id
+            for product_id, generations in self._entry_raw_probe_generations.get(
+                timestamp_ns, {}
+            ).items()
+            if (
+                product_id not in self._contract_expired_product_ids
+                and self._entry_raw_generation[product_id] in generations
+            )
+        }
+        return normal_triggered.union(raw_triggered)
+
+    def _entry_probe_products_at(
+        self,
+        timestamp_ns: int,
+        *,
+        triggered: set[str] | None = None,
+    ) -> set[str]:
+        if self._active_entry_probe_timestamp_ns == timestamp_ns:
+            return set(self._active_entry_probe_products)
+
+        pending = set(self._pending_entry_product_ids())
+        explicit = (
+            self._entry_triggered_products_at(timestamp_ns)
+            if triggered is None
+            else set(triggered)
+        )
+        if not explicit:
             return set()
-        # Any entry probe is a venue-wide scheduler event.  Even a request whose
-        # last capacity decision was blocked must participate in current-state
-        # refresh and priority traversal; only spot_eligible may suppress the
-        # duplicate planner audit after proving its complete signature unchanged.
-        return set(triggered).union(self._pending_entry_product_ids())
+        # Any entry probe is a venue-wide scheduler event.  Every pending request
+        # participates in priority traversal; the refresh phase may retain only a
+        # fully proven incidental C9 sleep while explicit triggers resolve afresh.
+        return explicit.union(pending)
 
     def _pending_entry_product_ids(self) -> frozenset[str]:
         return frozenset(
@@ -5441,8 +5684,74 @@ class S1EventLoop:
             if binding.kind == "new" and binding.stage == STAGE
         )
 
+    def _active_cap_blocked_entry_product_ids(self) -> set[str]:
+        return {
+            product_id
+            for product_id, monitor in self._cap_blocked_entry_products.items()
+            if monitor.policy_generation == self._entry_policy_generation[product_id]
+        }
+
+    def _advance_entry_raw_generation(self, product_id: str) -> None:
+        self._entry_raw_generation[product_id] += 1
+
+    def _clear_cap_blocked_entry_product(
+        self,
+        product_id: str,
+        *,
+        invalidate_raw_wakes: bool = True,
+    ) -> None:
+        removed = self._cap_blocked_entry_products.pop(product_id, None)
+        if removed is not None and invalidate_raw_wakes:
+            self._advance_entry_raw_generation(product_id)
+
+    def _clear_all_cap_blocked_entry_products(self) -> None:
+        for product_id in tuple(self._cap_blocked_entry_products):
+            self._clear_cap_blocked_entry_product(product_id)
+
+    @staticmethod
+    def _entry_policy_signature(state: EntryObservation) -> tuple[object, ...]:
+        """Fields that make a new 1 Hz quote intent supersede a C9 monitor."""
+
+        if state.policy_state_signature is not None:
+            return ("panel_policy_state", *state.policy_state_signature)
+        return (
+            "legacy_resolved_state",
+            state.absolute_price_tick,
+            state.target_price,
+            state.reservation_notional_twd,
+            state.base_gate_open,
+            state.admission_open,
+            state.gate_reason,
+            state.frozen_exit_threshold_basis_bp,
+            state.frozen_exit_target_price,
+            state.frozen_exit_absolute_price_tick,
+            state.base_gate_book_wake_venues,
+        )
+
+    @staticmethod
+    def _entry_applied_signature(state: EntryObservation) -> tuple[object, ...]:
+        """Controller/raw-blocker state used to suppress unchanged full rows."""
+
+        return (
+            state.absolute_price_tick,
+            state.base_gate_open,
+            state.admission_open,
+            state.gate_reason,
+            state.base_gate_book_wake_venues,
+        )
+
     @staticmethod
     def _admission_inputs_signature(state: EntryObservation) -> tuple[object, ...]:
+        """Return only inputs that can change the C9 capacity decision.
+
+        A blocked request cannot be assigned, so cursor-bearing maker snapshots
+        and economic audit objects do not affect its capacity outcome.  Keeping
+        them in this key made every raw-book wake look different even when the
+        candidate notional and both committed totals were unchanged.  The
+        latest full state is still refreshed on every wake and is used once a
+        capacity change makes the request eligible for a new decision.
+        """
+
         return (
             state.absolute_price_tick,
             state.target_price,
@@ -5450,11 +5759,6 @@ class S1EventLoop:
             state.base_gate_open,
             state.admission_open,
             state.gate_reason,
-            state.maker_snapshot,
-            state.frozen_exit_threshold_basis_bp,
-            state.frozen_exit_target_price,
-            state.frozen_exit_absolute_price_tick,
-            state.economic_estimate,
         )
 
     def _blocked_admission_sleep_value(
@@ -5500,6 +5804,41 @@ class S1EventLoop:
             ).total_committed_notional_twd
         )
 
+    def _can_reuse_incidental_cap_blocked_entry_state(
+        self,
+        product_id: str,
+    ) -> bool:
+        """Return whether a sibling wake can retain one exact C9 sleep state.
+
+        This is intentionally narrower than generic pending-state caching.  A
+        request without a live denial binding, an own policy/raw trigger, or a
+        changed ledger balance must pass through ``current_state`` so an actual
+        assignment always freezes the latest target, economics, and snapshot.
+        """
+
+        if not self._suppress_redundant_blocked_admission_probes:
+            return False
+        monitor = self._cap_blocked_entry_products.get(product_id)
+        if (
+            monitor is None
+            or monitor.policy_generation
+            != self._entry_policy_generation[product_id]
+        ):
+            return False
+        binding = self._request_bindings.get(monitor.denied_request_id)
+        if (
+            binding is None
+            or binding.kind != "new"
+            or binding.stage != STAGE
+            or binding.product_id != product_id
+            or binding.request.request_id != monitor.denied_request_id
+        ):
+            return False
+        state = self._actual_state.get(product_id)
+        if state is None or state.product_id != product_id:
+            return False
+        return self._blocked_admission_probe_is_redundant(binding, state)
+
     def _schedule_time(self, timestamp_ns: int) -> None:
         _nonnegative_int(timestamp_ns, "timeline timestamp")
         if self._current_time_ns is not None and timestamp_ns <= self._current_time_ns:
@@ -5531,6 +5870,27 @@ class S1EventLoop:
             raise RuntimeError("effect cursor must belong to the active timestamp")
         self._phase_rows[phase] += 1
         return EventCursor(timestamp_ns, phase, self._phase_rows[phase])
+
+    def _entry_candidate_intent_cursor(
+        self,
+        product_id: str,
+        timestamp_ns: int,
+        phase: int,
+    ) -> EventCursor:
+        """Return an entry identity row local to one product and effect phase."""
+
+        if timestamp_ns != self._current_time_ns:
+            raise RuntimeError(
+                "entry candidate cursor must belong to the active timestamp"
+            )
+        if product_id not in self.controllers:
+            raise ValueError("entry candidate cursor requires a known product")
+        key = (product_id, phase)
+        self._entry_candidate_intent_rows[key] += 1
+        row_index = self._entry_candidate_intent_rows[key]
+        if row_index > self._phase_rows[phase]:
+            raise RuntimeError("entry candidate cursor outran its effect phase")
+        return EventCursor(timestamp_ns, phase, row_index)
 
     def _validate_external_product(self, event: S1ExternalEvent) -> None:
         if isinstance(event, (EntryObservation, VenueBookUpdate)):

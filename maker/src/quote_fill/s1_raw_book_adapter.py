@@ -85,6 +85,10 @@ _EXIT_QUOTE_CLOCK_COLUMNS: Final = (
     "series_id",
     "clock_position",
 )
+_ENTRY_QUOTE_CLOCK_COLUMNS: Final = (
+    "series_id",
+    "clock_position",
+)
 _L1_PAYLOAD_COLUMNS: Final = tuple(
     f"{side}_{kind}_{level}"
     for side in ("bid", "ask")
@@ -222,6 +226,8 @@ class _BookSeries:
     length: int
     effective_position_start: int
     effective_length: int
+    entry_quote_position_start: int
+    entry_quote_length: int
     exit_quote_position_start: int
     exit_quote_length: int
     spot_lookup_start: int
@@ -248,6 +254,7 @@ class RawBookDayIndex:
 
     _clock: pl.DataFrame = field(repr=False)
     _effective_clock: pl.DataFrame = field(repr=False)
+    _entry_quote_clock: pl.DataFrame = field(repr=False)
     _exit_quote_clock: pl.DataFrame = field(repr=False)
     _spot_lookup: pl.DataFrame = field(repr=False)
     _series: Mapping[RawBookKey, _BookSeries] = field(repr=False)
@@ -257,6 +264,7 @@ class RawBookDayIndex:
     _clock_loop_row_index: object = field(init=False, repr=False, compare=False)
     _clock_packet_sequence: object = field(init=False, repr=False, compare=False)
     _effective_clock_positions: object = field(init=False, repr=False, compare=False)
+    _entry_quote_clock_positions: object = field(init=False, repr=False, compare=False)
     _exit_quote_clock_positions: object = field(init=False, repr=False, compare=False)
     _indexed_interval_cache: dict[RawBookKey, _IndexedIntervalCache] = field(
         init=False, repr=False, compare=False
@@ -272,6 +280,11 @@ class RawBookDayIndex:
             self._effective_clock,
             set(_EFFECTIVE_CLOCK_COLUMNS),
             "effective-state change clock",
+        )
+        _require_columns(
+            self._entry_quote_clock,
+            set(_ENTRY_QUOTE_CLOCK_COLUMNS),
+            "entry-route quote change clock",
         )
         _require_columns(
             self._exit_quote_clock,
@@ -318,6 +331,11 @@ class RawBookDayIndex:
             self,
             "_effective_clock_positions",
             _packed_integer_column(self._effective_clock, "clock_position"),
+        )
+        object.__setattr__(
+            self,
+            "_entry_quote_clock_positions",
+            _packed_integer_column(self._entry_quote_clock, "clock_position"),
         )
         object.__setattr__(
             self,
@@ -377,17 +395,20 @@ class RawBookDayIndex:
             "future": _MarketPayloads(future.l1, future.best),
         }
         effective_clock = _effective_change_clock(clock, payloads)
+        entry_quote_clock = _entry_quote_change_clock(clock, payloads, pairs)
         exit_quote_clock = _exit_quote_change_clock(clock, payloads, pairs)
         spot_lookup = _spot_source_lookup(clock)
         return cls(
             clock,
             effective_clock,
+            entry_quote_clock,
             exit_quote_clock,
             spot_lookup.select("channel_sequence", "clock_position"),
             _series_metadata(
                 pairs,
                 clock,
                 effective_clock,
+                entry_quote_clock,
                 exit_quote_clock,
                 spot_lookup,
             ),
@@ -408,6 +429,12 @@ class RawBookDayIndex:
         """Number of retained rows that alter the forward-filled book state."""
 
         return self._effective_clock.height
+
+    @property
+    def entry_quote_change_count(self) -> int:
+        """Number of Spot-Bid entry route decision-state transitions."""
+
+        return self._entry_quote_clock.height
 
     @property
     def exit_quote_change_count(self) -> int:
@@ -440,6 +467,7 @@ class RawBookDayIndex:
             {
                 "clock": self._clock.clone(),
                 "effective_clock": self._effective_clock.clone(),
+                "entry_quote_clock": self._entry_quote_clock.clone(),
                 "exit_quote_clock": self._exit_quote_clock.clone(),
                 "spot_lookup": self._spot_lookup.clone(),
                 "spot_l1": self._payloads["spot"].l1.clone(),
@@ -589,6 +617,11 @@ class RawBookDayIndex:
 
         return self._require_series(key).exit_quote_length
 
+    def entry_quote_event_count(self, key: RawBookKey) -> int:
+        """Return route-specific Spot-Bid entry wake count for one series."""
+
+        return self._require_series(key).entry_quote_length
+
     def event_as_of(
         self,
         key: RawBookKey,
@@ -674,6 +707,34 @@ class RawBookDayIndex:
             return None
         effective_position = series.effective_position_start + relative
         clock_position = int(self._effective_clock_positions[effective_position])
+        return self._indexed_event(clock_position, key).event.book_cursor
+
+    def next_entry_quote_change_cursor(
+        self,
+        key: RawBookKey,
+        after: QueryBoundary,
+    ) -> RawBookCursor | None:
+        """Return the next Spot-Bid entry decision-state change.
+
+        Spot rows retain Trial/formal transitions, normalized top-two bid and
+        ask-BBO price/presence changes, and raw source Bid1/Bid2
+        price/presence changes used by the exact AB1/2 admission check.  Lots
+        changes within the positive domain and deeper prices that do not alter
+        the canonical top two cannot change entry admission or economics.
+
+        Future rows retain Trial/formal transitions and changes to either the
+        sell-one bid or buy-one ask executable status/VWAP.  The shared
+        crossed/reference-band legality is part of both nullable executable
+        values, so quantity-only changes at sufficient one-contract depth and
+        irrelevant L2 changes do not wake the loop.
+        """
+
+        series = self._require_series(key)
+        relative = self._entry_quote_right_index(series, after)
+        if relative >= series.entry_quote_length:
+            return None
+        derived_position = series.entry_quote_position_start + relative
+        clock_position = int(self._entry_quote_clock_positions[derived_position])
         return self._indexed_event(clock_position, key).event.book_cursor
 
     def next_exit_quote_change_cursor(
@@ -778,6 +839,24 @@ class RawBookDayIndex:
             middle = (low + high) // 2
             effective_position = series.effective_position_start + middle
             clock_position = int(self._effective_clock_positions[effective_position])
+            if self._packed_boundary(clock_position, boundary_kind) <= target:
+                low = middle + 1
+            else:
+                high = middle
+        return low
+
+    def _entry_quote_right_index(
+        self,
+        series: _BookSeries,
+        at: QueryBoundary,
+    ) -> int:
+        boundary_kind, target = _query_boundary_parts(at)
+        low = 0
+        high = series.entry_quote_length
+        while low < high:
+            middle = (low + high) // 2
+            derived_position = series.entry_quote_position_start + middle
+            clock_position = int(self._entry_quote_clock_positions[derived_position])
             if self._packed_boundary(clock_position, boundary_kind) <= target:
                 low = middle + 1
             else:
@@ -957,6 +1036,26 @@ class RawBookRiskAdapter:
         if deadline < after.recv_time_ns:
             raise ValueError("deadline_ns cannot precede after_cursor")
         candidate = self.index.next_exit_quote_change_cursor(
+            self._key(venue, product_id), after
+        )
+        if candidate is None or candidate.cursor.recv_time_ns > deadline:
+            return None
+        return candidate.cursor
+
+    def next_entry_quote_change_cursor(
+        self,
+        venue: Market,
+        product_id: str,
+        after_cursor: EventCursor,
+        deadline_ns: int,
+    ) -> EventCursor | None:
+        """Return the route-specific Spot-Bid entry wake through the deadline."""
+
+        after = _event_cursor(after_cursor, "after_cursor")
+        deadline = _nonnegative_integer(deadline_ns, "deadline_ns")
+        if deadline < after.recv_time_ns:
+            raise ValueError("deadline_ns cannot precede after_cursor")
+        candidate = self.index.next_entry_quote_change_cursor(
             self._key(venue, product_id), after
         )
         if candidate is None or candidate.cursor.recv_time_ns > deadline:
@@ -1358,6 +1457,241 @@ def _effective_change_clock(
     return pl.concat(market_clocks, how="vertical").sort("series_id", "clock_position")
 
 
+def _entry_quote_change_clock(
+    clock: pl.DataFrame,
+    payloads: Mapping[Market, _MarketPayloads],
+    pairs: tuple[_MappingPair, ...],
+) -> pl.DataFrame:
+    """Derive exact Spot-Bid entry wakes from route-visible book state."""
+
+    positioned = clock.with_row_index("clock_position")
+    spot = _normalized_spot_entry_clock(positioned, payloads["spot"])
+    spot_state_columns = (
+        "canonical_bid_price_1",
+        "canonical_bid_price_2",
+        "canonical_ask_price_1",
+        "source_bid_price_1",
+        "source_bid_price_2",
+    )
+    spot_with_previous = spot.with_columns(
+        pl.col("clock_position")
+        .shift(1)
+        .over("series_id")
+        .alias("previous_clock_position"),
+        pl.col("trial_match")
+        .shift(1)
+        .over("series_id")
+        .alias("previous_trial_match"),
+        *(
+            pl.col(column)
+            .shift(1)
+            .over("series_id")
+            .alias(f"previous_{column}")
+            for column in spot_state_columns
+        ),
+    )
+    spot_changes = spot_with_previous.filter(
+        pl.col("previous_clock_position").is_null()
+        | pl.col("trial_match").ne_missing(pl.col("previous_trial_match"))
+        | (
+            ~pl.col("trial_match")
+            & pl.any_horizontal(
+                *(
+                    pl.col(column).ne_missing(pl.col(f"previous_{column}"))
+                    for column in spot_state_columns
+                )
+            )
+        )
+    ).select(*_ENTRY_QUOTE_CLOCK_COLUMNS)
+
+    future_references = pl.DataFrame(
+        {
+            "series_id": pl.Series(
+                [pair.series_id("future") for pair in pairs],
+                dtype=pl.UInt32,
+            ),
+            "reference_price": pl.Series(
+                [pair.future_reference for pair in pairs],
+                dtype=pl.Float64,
+            ),
+        }
+    )
+    future = _normalized_bbo_clock(
+        positioned, payloads["future"], market="future"
+    ).join(
+        future_references,
+        on="series_id",
+        how="left",
+        validate="m:1",
+        maintain_order="left",
+    )
+    reference = pl.col("reference_price")
+    bid = pl.col("bbo_bid_price")
+    ask = pl.col("bbo_ask_price")
+    one_contract_executable = (
+        ~pl.col("trial_match")
+        & reference.is_not_null()
+        & reference.is_finite()
+        & (reference > 0)
+        & bid.is_not_null()
+        & ask.is_not_null()
+        & bid.is_finite()
+        & ask.is_finite()
+        & (bid <= ask)
+        & (bid > reference * 0.91)
+        & (bid < reference * 1.08)
+        & (ask > reference * 0.91)
+        & (ask < reference * 1.08)
+    )
+    future_changes = (
+        future.with_columns(
+            pl.when(one_contract_executable)
+            .then(bid)
+            .otherwise(None)
+            .alias("sell_one_vwap"),
+            pl.when(one_contract_executable)
+            .then(ask)
+            .otherwise(None)
+            .alias("buy_one_vwap"),
+        )
+        .with_columns(
+            pl.col("clock_position")
+            .shift(1)
+            .over("series_id")
+            .alias("previous_clock_position"),
+            pl.col("trial_match")
+            .shift(1)
+            .over("series_id")
+            .alias("previous_trial_match"),
+            pl.col("sell_one_vwap")
+            .shift(1)
+            .over("series_id")
+            .alias("previous_sell_one_vwap"),
+            pl.col("buy_one_vwap")
+            .shift(1)
+            .over("series_id")
+            .alias("previous_buy_one_vwap"),
+        )
+        .filter(
+            pl.col("previous_clock_position").is_null()
+            | pl.col("trial_match").ne_missing(pl.col("previous_trial_match"))
+            | (
+                ~pl.col("trial_match")
+                & (
+                    pl.col("sell_one_vwap").ne_missing(
+                        pl.col("previous_sell_one_vwap")
+                    )
+                    | pl.col("buy_one_vwap").ne_missing(
+                        pl.col("previous_buy_one_vwap")
+                    )
+                )
+            )
+        )
+        .select(*_ENTRY_QUOTE_CLOCK_COLUMNS)
+    )
+    return pl.concat([spot_changes, future_changes], how="vertical").sort(
+        "series_id", "clock_position"
+    )
+
+
+def _normalized_spot_entry_clock(
+    positioned_clock: pl.DataFrame,
+    payloads: _MarketPayloads,
+) -> pl.DataFrame:
+    """Project the exact Spot fields used by target and AB1/2 admission."""
+
+    current_l1 = payloads.l1.with_row_index("current_l1_payload_id").select(
+        "current_l1_payload_id",
+        *(
+            _normalized_payload_price(
+                f"bid_price_{level}",
+                f"bid_lots_{level}",
+                market="spot",
+            ).alias(f"current_l1_bid_price_{level}")
+            for level in range(1, 6)
+        ),
+        *(
+            _normalized_payload_price(
+                f"ask_price_{level}",
+                f"ask_lots_{level}",
+                market="spot",
+            ).alias(f"current_l1_ask_price_{level}")
+            for level in range(1, 6)
+        ),
+    )
+    current_best = payloads.best.with_row_index(
+        "current_best_payload_id"
+    ).select(
+        "current_best_payload_id",
+        _normalized_payload_price(
+            "best_bid_price", "best_bid_lots", market="spot"
+        ).alias("current_best_bid_price"),
+        _normalized_payload_price(
+            "best_ask_price", "best_ask_lots", market="spot"
+        ).alias("current_best_ask_price"),
+    )
+    source_l1 = payloads.l1.with_row_index("own_l1_payload_id").select(
+        "own_l1_payload_id",
+        _normalized_payload_price(
+            "bid_price_1", "bid_lots_1", market="spot"
+        ).alias("source_bid_price_1"),
+        _normalized_payload_price(
+            "bid_price_2", "bid_lots_2", market="spot"
+        ).alias("source_bid_price_2"),
+    )
+    bid_candidates = (
+        *(pl.col(f"current_l1_bid_price_{level}") for level in range(1, 6)),
+        pl.col("current_best_bid_price"),
+    )
+    ask_candidates = (
+        *(pl.col(f"current_l1_ask_price_{level}") for level in range(1, 6)),
+        pl.col("current_best_ask_price"),
+    )
+    canonical_bid_1 = pl.max_horizontal(*bid_candidates)
+    joined = (
+        positioned_clock.filter(pl.col("series_id") % 2 == _MARKET_ORDER["spot"])
+        .join(
+            current_l1,
+            on="current_l1_payload_id",
+            how="left",
+            validate="m:1",
+            maintain_order="left",
+        )
+        .join(
+            current_best,
+            on="current_best_payload_id",
+            how="left",
+            validate="m:1",
+            maintain_order="left",
+        )
+        .join(
+            source_l1,
+            on="own_l1_payload_id",
+            how="left",
+            validate="m:1",
+            maintain_order="left",
+        )
+        .with_columns(canonical_bid_1.alias("canonical_bid_price_1"))
+    )
+    return joined.select(
+        "series_id",
+        "clock_position",
+        "trial_match",
+        "canonical_bid_price_1",
+        pl.max_horizontal(
+            *(
+                pl.when(candidate < pl.col("canonical_bid_price_1"))
+                .then(candidate)
+                .otherwise(None)
+                for candidate in bid_candidates
+            )
+        ).alias("canonical_bid_price_2"),
+        pl.min_horizontal(*ask_candidates).alias("canonical_ask_price_1"),
+        "source_bid_price_1",
+        "source_bid_price_2",
+    )
+
+
 def _exit_quote_change_clock(
     clock: pl.DataFrame,
     payloads: Mapping[Market, _MarketPayloads],
@@ -1562,11 +1896,13 @@ def _series_metadata(
     pairs: tuple[_MappingPair, ...],
     clock: pl.DataFrame,
     effective_clock: pl.DataFrame,
+    entry_quote_clock: pl.DataFrame,
     exit_quote_clock: pl.DataFrame,
     spot_lookup: pl.DataFrame,
 ) -> Mapping[RawBookKey, _BookSeries]:
     ranges = _frame_ranges(clock.select("series_id"))
     effective_ranges = _frame_ranges(effective_clock.select("series_id"))
+    entry_quote_ranges = _frame_ranges(entry_quote_clock.select("series_id"))
     exit_quote_ranges = _frame_ranges(exit_quote_clock.select("series_id"))
     spot_ranges = _frame_ranges(spot_lookup.select("series_id"))
     result: dict[RawBookKey, _BookSeries] = {}
@@ -1575,6 +1911,9 @@ def _series_metadata(
             series_id = pair.series_id(market)
             start, length = ranges.get(series_id, (0, 0))
             effective_start, effective_length = effective_ranges.get(series_id, (0, 0))
+            entry_quote_start, entry_quote_length = entry_quote_ranges.get(
+                series_id, (0, 0)
+            )
             exit_quote_start, exit_quote_length = exit_quote_ranges.get(
                 series_id, (0, 0)
             )
@@ -1585,6 +1924,8 @@ def _series_metadata(
                 length,
                 effective_start,
                 effective_length,
+                entry_quote_start,
+                entry_quote_length,
                 exit_quote_start,
                 exit_quote_length,
                 spot_start,

@@ -420,6 +420,8 @@ class S1ExitInventoryController:
             )
         self.maker_side = maker_side
         self._last_cursor: EventCursor | None = None
+        self._candidate_emission_key: tuple[int, int] | None = None
+        self._candidate_emission_next_row_by_tick: dict[int, int] = {}
         self._session_expired = False
         self._positions: dict[str, _Position] = {}
         self._pending_by_tick: dict[int, _PendingNew] = {}
@@ -1234,6 +1236,38 @@ class S1ExitInventoryController:
             commands.append(self._enqueue_new(tick, members, cursor, reason))
         return commands
 
+    def _next_candidate_intent_cursor(
+        self,
+        effect_cursor: EventCursor,
+        absolute_price_tick: int,
+    ) -> EventCursor:
+        """Return a product-local cursor for one material candidate emission.
+
+        ``effect_cursor.row_index`` is allocated across every product by the
+        outer event loop.  It is therefore scheduler provenance, not material
+        exit-intent identity: an unrelated product wake can otherwise rename an
+        identical candidate.  Only an actual enqueue consumes this product-local
+        per-tick ordinal, so an equivalent reconciliation which emits no candidate
+        cannot rename a later intent.  The state is reconstructed exactly by fact
+        replay.
+        """
+
+        key = (effect_cursor.recv_time_ns, effect_cursor.event_sequence)
+        if key != self._candidate_emission_key:
+            self._candidate_emission_key = key
+            self._candidate_emission_next_row_by_tick.clear()
+        row_index = self._candidate_emission_next_row_by_tick.get(
+            absolute_price_tick,
+            0,
+        )
+        self._candidate_emission_next_row_by_tick[absolute_price_tick] = row_index + 1
+        candidate_cursor = EventCursor(*key, row_index)
+        if candidate_cursor > effect_cursor:
+            raise RuntimeError(
+                "product-local candidate cursor cannot follow its effect cursor"
+            )
+        return candidate_cursor
+
     def _enqueue_new(
         self,
         tick: int,
@@ -1245,15 +1279,16 @@ class S1ExitInventoryController:
             raise RuntimeError("aggregate new requires positive frozen membership")
         if tick in self._pending_by_tick or tick in self._working_by_tick:
             raise RuntimeError("aggregate price is already reserved")
+        candidate_intent_cursor = self._next_candidate_intent_cursor(cursor, tick)
         candidate_id = candidate_intent_id(
-            **self._identity_fields(tick), intent_cursor=cursor
+            **self._identity_fields(tick), intent_cursor=candidate_intent_cursor
         )
         if candidate_id in self._pending_by_id:
             raise RuntimeError("candidate identity collision")
         pending = _PendingNew(
             candidate_intent_id=candidate_id,
             absolute_price_tick=tick,
-            intent_cursor=cursor,
+            intent_cursor=candidate_intent_cursor,
             scheduler_state="pending",
             members=members,
         )
@@ -1892,6 +1927,18 @@ class S1ExitInventoryController:
             "last_cursor": asdict(self._last_cursor)
             if self._last_cursor is not None
             else None,
+            "candidate_emission_state": {
+                "key": self._candidate_emission_key,
+                "next_row_by_tick": [
+                    {
+                        "absolute_price_tick": tick,
+                        "next_row_index": next_row,
+                    }
+                    for tick, next_row in sorted(
+                        self._candidate_emission_next_row_by_tick.items()
+                    )
+                ],
+            },
             "session_expired": self._session_expired,
             "positions": [asdict(item) for item in self.positions],
             "pending_orders": [asdict(item) for item in self.pending_orders],

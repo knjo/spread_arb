@@ -333,6 +333,32 @@ class CapacityReplayResult:
     transition_chain_sha256: str
 
 
+@dataclass(frozen=True)
+class _CapacityVerificationKey:
+    """Exact live-ledger state covered by one successful verification."""
+
+    mutation_revision: int
+    global_cap_twd: int
+    product_cap_twd: int
+    accounts: tuple[tuple[str, str, BucketBalances], ...]
+    product_balances: tuple[tuple[str, BucketBalances], ...]
+    global_balances: BucketBalances
+    transitions: tuple[CapacityTransition, ...]
+    transition_ids: frozenset[str]
+    last_cursor: tuple[int, int, int] | None
+    sequence_offset: int
+    transition_chain_sha256: str
+    replay_seed: CapacityLedgerSeed | None
+    replay_compact_checkpoint: CapacityLedgerCompactCheckpoint | None
+    resume_boundary_pending: bool
+
+
+@dataclass(frozen=True)
+class _CapacityVerificationCache:
+    key: _CapacityVerificationKey
+    replay: CapacityReplayResult
+
+
 @dataclass
 class _Account:
     product_id: str
@@ -765,6 +791,8 @@ class CapacityLedger:
         self._replay_compact_checkpoint: CapacityLedgerCompactCheckpoint | None = None
         self._resume_boundary_pending = False
         self._seed_through_date: str | None = None
+        self._mutation_revision = 0
+        self._verification_cache: _CapacityVerificationCache | None = None
 
     @classmethod
     def from_seed(cls, seed: CapacityLedgerSeed) -> CapacityLedger:
@@ -1376,7 +1404,13 @@ class CapacityLedger:
         )
 
     def verify(self) -> CapacityReplayResult:
-        """Replay the append-only rows and compare the reconstructed state."""
+        """Replay and validate rows, caching only an unchanged successful state."""
+
+        if (
+            self._verification_cache is not None
+            and self._verification_cache.key == self._verification_key()
+        ):
+            return _copy_capacity_replay_result(self._verification_cache.replay)
 
         replay = replay_capacity_transitions(
             self._transitions,
@@ -1428,7 +1462,33 @@ class CapacityLedger:
             raise CapacityReplayError(
                 "replayed transition chain differs from live state"
             )
-        return replay
+        cached_replay = _copy_capacity_replay_result(replay)
+        self._verification_cache = _CapacityVerificationCache(
+            key=self._verification_key(),
+            replay=cached_replay,
+        )
+        return _copy_capacity_replay_result(cached_replay)
+
+    def _verification_key(self) -> _CapacityVerificationKey:
+        return _CapacityVerificationKey(
+            mutation_revision=self._mutation_revision,
+            global_cap_twd=self.global_cap_twd,
+            product_cap_twd=self.product_cap_twd,
+            accounts=tuple(
+                (capacity_id, account.product_id, account.balances)
+                for capacity_id, account in sorted(self._accounts.items())
+            ),
+            product_balances=tuple(sorted(self._product_balances.items())),
+            global_balances=self._global_balances,
+            transitions=tuple(self._transitions),
+            transition_ids=frozenset(self._transition_ids),
+            last_cursor=self._last_cursor,
+            sequence_offset=self._sequence_offset,
+            transition_chain_sha256=self._transition_chain_sha256,
+            replay_seed=self._replay_seed,
+            replay_compact_checkpoint=self._replay_compact_checkpoint,
+            resume_boundary_pending=self._resume_boundary_pending,
+        )
 
     def _transfer(
         self,
@@ -1634,6 +1694,8 @@ class CapacityLedger:
         return account
 
     def _append(self, **values: object) -> CapacityTransition:
+        self._verification_cache = None
+        self._mutation_revision += 1
         transition = CapacityTransition(
             sequence=self._sequence_offset + len(self._transitions) + 1,
             global_cap_twd=self.global_cap_twd,
@@ -1654,6 +1716,25 @@ class CapacityLedger:
         )
         self._resume_boundary_pending = False
         return transition
+
+
+def _copy_capacity_replay_result(
+    replay: CapacityReplayResult,
+) -> CapacityReplayResult:
+    """Copy mutable replay maps so callers cannot modify cached verification."""
+
+    return CapacityReplayResult(
+        account_balances=dict(replay.account_balances),
+        account_products=dict(replay.account_products),
+        product_balances=dict(replay.product_balances),
+        global_balances=replay.global_balances,
+        last_timestamp_ns=replay.last_timestamp_ns,
+        last_event_sequence=replay.last_event_sequence,
+        last_row_index=replay.last_row_index,
+        last_sequence=replay.last_sequence,
+        seen_transition_ids=replay.seen_transition_ids,
+        transition_chain_sha256=replay.transition_chain_sha256,
+    )
 
 
 def replay_capacity_transitions(

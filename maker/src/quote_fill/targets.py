@@ -7,10 +7,10 @@ rounding and sign conventions across the sampler and replay code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Literal, Mapping
-
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Literal
 
 MakerSide = Literal["bid", "ask"]
 Stage = Literal["entry", "exit"]
@@ -92,16 +92,16 @@ def tick_index_to_price(
     high_price_boundary = _high_price_boundary(market, session_date)
     high_price_index = int(3100 + (high_price_boundary - 500))
     if index < 1000:
-        return index * 0.01
+        return float(index * 0.01)
     if index < 1800:
-        return 10 + (index - 1000) * 0.05
+        return float(10 + (index - 1000) * 0.05)
     if index < 2300:
-        return 50 + (index - 1800) * 0.1
+        return float(50 + (index - 1800) * 0.1)
     if index < 3100:
-        return 100 + (index - 2300) * 0.5
+        return float(100 + (index - 2300) * 0.5)
     if index < high_price_index:
-        return 500 + (index - 3100)
-    return high_price_boundary + (index - high_price_index) * 5
+        return float(500 + (index - 3100))
+    return float(high_price_boundary + (index - high_price_index) * 5)
 
 
 def absolute_price_tick(
@@ -116,7 +116,7 @@ def absolute_price_tick(
         market=market,
         session_date=session_date,
     )
-    rounded = int(round(index))
+    rounded = round(index)
     if not math.isclose(index, rounded, rel_tol=0.0, abs_tol=1e-7):
         raise ValueError(f"off-ladder price: {price}")
     return rounded

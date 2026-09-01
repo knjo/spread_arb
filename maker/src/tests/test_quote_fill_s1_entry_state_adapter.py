@@ -12,6 +12,7 @@ import polars as pl
 
 from ..quote_fill.layered import EventCursor
 from ..quote_fill.policy_spec import TOD_BUCKETS, PolicySpec
+from ..quote_fill.s1_day_state import S1_POLICY_DECISION_SIGNATURE_COLUMNS
 from ..quote_fill.s1_entry_state_adapter import S1EntryStateAdapter
 from ..quote_fill.s1_event_loop import ActualSendMakerSnapshot
 from ..quote_fill.s1_hedge import CausalBookState, RawBookCursor, RawBookLevel
@@ -112,6 +113,48 @@ def _specs() -> tuple[PolicySpec, ...]:
 
 
 class S1EntryStateAdapterTest(unittest.TestCase):
+    def test_sparse_observation_carries_exact_panel_policy_signature(self) -> None:
+        adapter = S1EntryStateAdapter(
+            _common(),
+            _specs(),
+            date=DATE,
+            policy_id="fixed20",
+            book_provider=Provider(),
+        )
+        signature_values = tuple(
+            f"signature-{index}"
+            for index, _ in enumerate(S1_POLICY_DECISION_SIGNATURE_COLUMNS)
+        )
+        changes = pl.DataFrame(
+            {
+                "Date": [DATE],
+                "ValueCode": ["2330"],
+                "decision_time_ns": [_time_ns(300)],
+                **{
+                    column: [value]
+                    for column, value in zip(
+                        S1_POLICY_DECISION_SIGNATURE_COLUMNS,
+                        signature_values,
+                        strict=True,
+                    )
+                },
+            }
+        )
+
+        observations = tuple(adapter.iter_observations(changes))
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(
+            observations[0].policy_state_signature,
+            signature_values,
+        )
+        with self.assertRaisesRegex(ValueError, "partial policy signature"):
+            tuple(
+                adapter.iter_observations(
+                    changes.drop(S1_POLICY_DECISION_SIGNATURE_COLUMNS[-1])
+                )
+            )
+
     def test_packed_decision_lookup_matches_legacy_and_caches_interval(self) -> None:
         adapter = S1EntryStateAdapter(
             _common(),

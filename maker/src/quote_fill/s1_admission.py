@@ -46,6 +46,7 @@ class CapacityAdmissionPlanner:
         self._shadow_product_twd: dict[str, int] = {}
         self._plans: list[PlannedAdmission] = []
         self._by_request: dict[str, PlannedAdmission] = {}
+        self._capacity_ids: set[str] = set()
         self._committed = False
 
     @property
@@ -81,7 +82,7 @@ class CapacityAdmissionPlanner:
             ):
                 raise ValueError("repeated request_id changed admission inputs")
             return existing
-        if any(plan.capacity_id == capacity_id for plan in self._plans):
+        if capacity_id in self._capacity_ids:
             raise ValueError("capacity_id cannot be shared by two requests")
 
         base_product = self._base_product_twd.setdefault(
@@ -118,6 +119,7 @@ class CapacityAdmissionPlanner:
         )
         self._plans.append(plan)
         self._by_request[request_id] = plan
+        self._capacity_ids.add(capacity_id)
         return plan
 
     def bind_assignment(

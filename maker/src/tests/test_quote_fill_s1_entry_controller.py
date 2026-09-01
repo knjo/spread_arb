@@ -112,6 +112,78 @@ class S1EntryControllerTest(unittest.TestCase):
             q95_order.raw_order_fact_id, changed_order.raw_order_fact_id
         )
 
+    def test_candidate_identity_uses_product_local_cursor_not_effect_row(self) -> None:
+        first = _controller()
+        second = _controller()
+        logical_cursor = EventCursor(10, 150, 1)
+
+        first_command = first.observe(
+            EventCursor(10, 150, 3),
+            100,
+            base_gate_open=True,
+            admission_open=True,
+            candidate_intent_cursor=logical_cursor,
+        )[0]
+        second_command = second.observe(
+            EventCursor(10, 150, 1),
+            100,
+            base_gate_open=True,
+            admission_open=True,
+            candidate_intent_cursor=logical_cursor,
+        )[0]
+
+        self.assertNotEqual(first_command.cursor, second_command.cursor)
+        self.assertEqual(
+            first_command.candidate_intent_id,
+            second_command.candidate_intent_id,
+        )
+        self.assertEqual(first_command.request_id, second_command.request_id)
+
+    def test_candidate_identity_local_ordinal_distinguishes_same_phase_reopen(
+        self,
+    ) -> None:
+        controller = _controller()
+        first = controller.observe(
+            EventCursor(10, 150, 2),
+            100,
+            base_gate_open=True,
+            admission_open=True,
+            candidate_intent_cursor=EventCursor(10, 150, 1),
+        )[0]
+        controller.observe(
+            EventCursor(10, 150, 4),
+            100,
+            base_gate_open=True,
+            admission_open=False,
+            candidate_intent_cursor=EventCursor(10, 150, 2),
+        )
+        reopened = controller.observe(
+            EventCursor(10, 150, 6),
+            100,
+            base_gate_open=True,
+            admission_open=True,
+            candidate_intent_cursor=EventCursor(10, 150, 3),
+        )[0]
+
+        self.assertNotEqual(first.candidate_intent_id, reopened.candidate_intent_id)
+        self.assertEqual(controller.intent_audit[0].intent_cursor, EventCursor(10, 150, 1))
+        reference = _controller().observe(
+            EventCursor(10, 150, 3),
+            100,
+            base_gate_open=True,
+            admission_open=True,
+        )[0]
+        self.assertEqual(reopened.candidate_intent_id, reference.candidate_intent_id)
+
+        with self.assertRaisesRegex(ValueError, "timestamp and phase"):
+            _controller().observe(
+                EventCursor(20, 150, 2),
+                100,
+                base_gate_open=True,
+                admission_open=True,
+                candidate_intent_cursor=EventCursor(19, 150, 1),
+            )
+
     def test_unsent_latest_desired_coalesces_without_raw_fact(self) -> None:
         controller = _controller()
         first = controller.observe(
