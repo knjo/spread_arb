@@ -996,6 +996,12 @@ class S1ProductionRunnerIntegrationTest(unittest.TestCase):
                     "BID2": 3,
                     "not_BID1_or_BID2": 4,
                 },
+                "exit_desired_withdrawal_reason_counts": {
+                    "gate:future_empty_book_side": 2,
+                    "safety_cutoff": 1,
+                },
+                "exit_cutoff_sessions": 71,
+                "exit_drain_barrier_sessions": 71,
                 "risk_groups": [
                     {
                         "stage": "entry",

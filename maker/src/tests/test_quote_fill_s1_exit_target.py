@@ -118,7 +118,7 @@ class S1SpotAskTargetTest(unittest.TestCase):
         self.assertFalse(deeper.queue_observable)
         self.assertTrue(deeper.gate_open)
 
-    def test_spot_gate_closes_but_future_depth_is_diagnostic_only(self) -> None:
+    def test_spot_and_future_hedgeability_both_gate_passive_exit(self) -> None:
         cursor = EventCursor(200)
         trial = _book(
             190,
@@ -174,8 +174,8 @@ class S1SpotAskTargetTest(unittest.TestCase):
             future_book=shallow_future,
             future_contracts=2,
         )
-        self.assertTrue(shallow.gate_open)
-        self.assertEqual(shallow.gate_reason, "eligible")
+        self.assertFalse(shallow.gate_open)
+        self.assertEqual(shallow.gate_reason, "future_insufficient_depth")
         self.assertIsNone(shallow.future_buy_vwap)
         self.assertIsNone(shallow.effective_exit_basis_bp)
 
@@ -219,12 +219,15 @@ class S1SpotAskTargetTest(unittest.TestCase):
         missing = observe(None)
 
         for target in (at_100, at_102, missing):
-            self.assertTrue(target.gate_open)
             self.assertEqual(target.target_price, 100.0)
             self.assertEqual(
                 target.absolute_price_tick,
                 absolute_price_tick(100.0),
             )
+        self.assertTrue(at_100.gate_open)
+        self.assertTrue(at_102.gate_open)
+        self.assertFalse(missing.gate_open)
+        self.assertEqual(missing.gate_reason, "missing_future_book")
         self.assertNotEqual(
             at_100.effective_exit_basis_bp,
             at_102.effective_exit_basis_bp,

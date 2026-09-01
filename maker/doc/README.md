@@ -21,7 +21,7 @@
 | [SKILLS.md](SKILLS.md)、[ASSIGNMENTS.md](ASSIGNMENTS.md) | 能力邊界、work packages | 後續依 S0–S5 實作同步更新 |
 | [quote_fill/AUGUST_ATTRIBUTION_20260824.md](quote_fill/AUGUST_ATTRIBUTION_20260824.md) | S0：8 月 q95 market／boundary vs queue 歸因 | **完成；兩者並列** |
 | [quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md](quote_fill/FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5：15s anchor、Q2 trail20、S1 mother與frozen lower重算 | 完整完成；已由cost-aware S1 grid採用 |
-| [quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md](quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md) | S1：新七組、成本gate、absolute exit、20M cap與preflight | **程式與359項回歸完成；待smoke／正式replay** |
+| [quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md](quote_fill/S1_COST_AWARE_IMPLEMENTATION_20260831.md) | S1：新七組、成本gate、absolute exit、exit risk guard、20M cap與preflight | **程式與363項回歸完成；待smoke／正式replay** |
 | [quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md](quote_fill/FOUNDATION_REVALIDATION_S05_20260825.md) | S0.5 前一版 anchor／q 基礎重驗 | 歷史 predecessor |
 | [REWORK_PLAN_20260824.md](REWORK_PLAN_20260824.md) | A1–D10、共同口徑與 S0–S5 執行 checklist | **S0／S0.5完成；cost-aware S1待smoke／正式replay** |
 

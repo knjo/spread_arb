@@ -53,11 +53,13 @@ S1 已依停止後稽核重建為 cost-aware 七組：一個 ungated q95/C0 cont
 mother×TOD cells；unsupported lookup是 explicit no-trade，不刪共同分母。六組在 actual new-send 以當下 Spot maker
 target、Future executable bid／ask、完整已知稅費與 safety floor做 admission；control只供辨識 gate影響，不進 shortlist。
 
-Normal exit已改為在entry actual-send鎖定 absolute Spot Ask price／tick，後續 Future Ask不會重設 maker target；route維持
+Normal exit已改為在entry actual-send鎖定 absolute Spot Ask price／tick；後續 Future Ask不會重設 maker target，但其buy-side
+L1-L5必須能完整避險，被動Spot單才可維持working，Spot／Future任一book變化都會喚醒重驗。13:19:45固定開始drain，
+13:19:49.950仍未真正撤完即fail closed；actual cancel effect前的fill仍照B6處理，真正naked unresolved不會用mark或expiry洗平。Route維持
 `Spot Ask maker → Future buy taker`，不是 taker+taker。20M global／10M single-product chronological cap、B6最長5秒
 retry、逐腿成本 ledger、SSD2 Spot／makerFill與NAS individual-stock-futures path contract、cost/publication audits均已進入
 整體驗證。完整facts後仍open的position已接上8/13 13:20共同全量executable mark；同商品先聚合數量再掃depth，並把已發生
-成本與剩餘exit成本納入economic ranking。正式 replay 前仍須完成clean-source commit與單partition smoke；因此
+成本與剩餘exit成本納入economic ranking。363項S1回歸與19項path contract已通過；正式 replay 前仍須完成clean-source commit與單partition smoke；因此
 目前沒有新的71日 S1績效、champion或可部署baseline。S0是`cap=∞` quote-only診斷；S0.5是known-cost pre-replay
 foundation；兩者也不可直接當成20M績效。
 

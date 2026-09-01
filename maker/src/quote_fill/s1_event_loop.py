@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -60,6 +60,7 @@ from .s1_exit_fifo_coordinator import build_exit_fifo_desired_updates
 from .s1_exit_fill_allocator import ExitPhysicalFill, S1SpotAskFillAllocator
 from .s1_exit_inventory import (
     ExitControllerCommand,
+    ExitDesiredUpdate,
     ExitFillAllocation,
     ExitHedgeUnitRequest,
     ExitInventoryFact,
@@ -651,6 +652,26 @@ class EntryCutoff:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitCutoff:
+    """Pre-horizon drain trigger for all normal passive exit orders."""
+
+    source_cursor: EventCursor
+
+    def __post_init__(self) -> None:
+        _cursor(self.source_cursor, "source_cursor")
+
+
+@dataclass(frozen=True, slots=True)
+class ExitDrainBarrier:
+    """Latest safe maker-fill cursor after which passive exit must be flat."""
+
+    source_cursor: EventCursor
+
+    def __post_init__(self) -> None:
+        _cursor(self.source_cursor, "source_cursor")
+
+
+@dataclass(frozen=True, slots=True)
 class SessionExpiry:
     source_cursor: EventCursor
 
@@ -672,7 +693,13 @@ class ContractExpiry:
 
 
 type S1ExternalEvent = (
-    EntryObservation | VenueBookUpdate | EntryCutoff | SessionExpiry | ContractExpiry
+    EntryObservation
+    | VenueBookUpdate
+    | EntryCutoff
+    | ExitCutoff
+    | ExitDrainBarrier
+    | SessionExpiry
+    | ContractExpiry
 )
 
 
@@ -1111,6 +1138,9 @@ class S1ReplayResult:
     expiry_marks: tuple[S1ExpiryMarkSummary, ...] = ()
     expiry_mark_count: int = 0
     suppressed_redundant_blocked_admission_probes: int = 0
+    exit_desired_withdrawal_reason_counts: tuple[tuple[str, int], ...] = ()
+    exit_cutoff_applied: bool = False
+    exit_drain_barrier_applied: bool = False
 
 
 @dataclass(slots=True)
@@ -1482,6 +1512,7 @@ class S1EventLoop:
         self._exit_rollback_unit_notional: dict[str, int] = {}
         self._exit_inventory_facts: list[ExitInventoryFact] = []
         self._exit_physical_fills: list[ExitPhysicalFill] = []
+        self._exit_desired_withdrawal_reasons: Counter[str] = Counter()
         self._next_position_establishment_sequence = 1 + max(
             (value.position_established_fact.sequence for value in self.carry_in),
             default=0,
@@ -1519,6 +1550,9 @@ class S1EventLoop:
         self._current_time_ns: int | None = None
         self._last_processed_time_ns: int | None = None
         self._cutoff_applied = False
+        self._exit_cutoff_applied = False
+        self._exit_drain_barrier_applied = False
+        self._exit_drain_barrier_due = False
         self._expiry_applied = False
         self._expiry_due = False
         self._ran = False
@@ -1572,6 +1606,8 @@ class S1EventLoop:
                     EntryObservation,
                     VenueBookUpdate,
                     EntryCutoff,
+                    ExitCutoff,
+                    ExitDrainBarrier,
                     SessionExpiry,
                     ContractExpiry,
                 ),
@@ -1703,6 +1739,11 @@ class S1EventLoop:
             suppressed_redundant_blocked_admission_probes=(
                 self._suppressed_redundant_blocked_admission_probes
             ),
+            exit_desired_withdrawal_reason_counts=tuple(
+                sorted(self._exit_desired_withdrawal_reasons.items())
+            ),
+            exit_cutoff_applied=self._exit_cutoff_applied,
+            exit_drain_barrier_applied=self._exit_drain_barrier_applied,
         )
 
     def _process_timestamp(
@@ -1742,6 +1783,9 @@ class S1EventLoop:
                 PHASE_POST_ROLLBACK_TIMEOUT,
             )
             self._expire_new_rollbacks_at_deadline(timestamp_ns, new_rollbacks)
+        if self._exit_drain_barrier_due:
+            self._assert_exit_drain_barrier(timestamp_ns)
+            self._exit_drain_barrier_due = False
         if released and self._has_pending_entry_new():
             retry_time_ns = timestamp_ns + CAP_RETRY_DELAY_NS
             self._new_probe_products[retry_time_ns].update(
@@ -1776,7 +1820,7 @@ class S1EventLoop:
                         "VenueBookUpdate cannot be mixed with RiskBookAdapter"
                     )
                 self._books[event.venue][event.product_id].ingest(event.event)
-                if self.normal_exit_enabled and event.venue == SPOT:
+                if self.normal_exit_enabled and event.venue in (SPOT, FUTURE):
                     self._exit_probe_products[timestamp_ns].add(event.product_id)
                 continue
             if isinstance(event, ContractExpiry):
@@ -1821,6 +1865,23 @@ class S1EventLoop:
                     cursor = self._effect_cursor(timestamp_ns, PHASE_OBSERVE)
                     commands = self.controllers[product_id].cutoff(cursor)
                     self._apply_commands(product_id, commands)
+                continue
+            if isinstance(event, ExitCutoff):
+                if self._exit_cutoff_applied:
+                    raise ValueError("exit cutoff appears more than once")
+                self._exit_cutoff_applied = True
+                if self.normal_exit_enabled:
+                    self._exit_probe_products[timestamp_ns].update(
+                        self.exit_controllers
+                    )
+                continue
+            if isinstance(event, ExitDrainBarrier):
+                if self._exit_drain_barrier_applied:
+                    raise ValueError("exit drain barrier appears more than once")
+                if not self._exit_cutoff_applied:
+                    raise ValueError("exit drain barrier requires an earlier cutoff")
+                self._exit_drain_barrier_applied = True
+                self._exit_drain_barrier_due = True
                 continue
             if not isinstance(event, SessionExpiry):
                 raise TypeError("unsupported external event")
@@ -2156,6 +2217,24 @@ class S1EventLoop:
             controller = self.exit_controllers[product_id]
             if controller.session_expired:
                 continue
+            if self._exit_cutoff_applied:
+                positions = controller.positions
+                if positions and any(position.desired_shares for position in positions):
+                    self._exit_desired_withdrawal_reasons["safety_cutoff"] += sum(
+                        position.desired_shares > 0 for position in positions
+                    )
+                    cutoff_fact = controller.set_positions_desired(
+                        tuple(
+                            ExitDesiredUpdate(position.position_id, None, 0)
+                            for position in positions
+                        ),
+                        cursor=self._effect_cursor(
+                            timestamp_ns,
+                            PHASE_PRE_SEND_REFRESH,
+                        ),
+                    )
+                    self._apply_exit_inventory_fact(product_id, cutoff_fact)
+                continue
             observation_cursor = self._effect_cursor(
                 timestamp_ns,
                 PHASE_PRE_SEND_REFRESH,
@@ -2268,6 +2347,21 @@ class S1EventLoop:
                     for update in updates
                 )
                 if current != desired:
+                    current_shares = {
+                        position_id: shares for position_id, _tick, shares in current
+                    }
+                    for update in updates:
+                        if (
+                            current_shares[update.position_id] > 0
+                            and update.desired_shares == 0
+                        ):
+                            target = targets[update.position_id]
+                            reason = (
+                                f"gate:{target.gate_reason}"
+                                if not target.gate_open
+                                else "fifo_or_execution_state"
+                            )
+                            self._exit_desired_withdrawal_reasons[reason] += 1
                     desired_fact = controller.set_positions_desired(
                         updates,
                         cursor=self._effect_cursor(
@@ -2287,6 +2381,35 @@ class S1EventLoop:
                     product_id,
                     observation_cursor,
                 )
+
+    def _assert_exit_drain_barrier(self, timestamp_ns: int) -> None:
+        """Fail closed unless every passive exit order is terminal at the barrier."""
+
+        if not self.normal_exit_enabled:
+            return
+        violations: list[str] = []
+        for product_id in sorted(self.exit_controllers):
+            controller = self.exit_controllers[product_id]
+            desired = sum(position.desired_shares for position in controller.positions)
+            pending = len(controller.pending_orders)
+            working = len(controller.working_orders)
+            if desired or pending or working:
+                violations.append(
+                    f"{product_id}:desired={desired},pending={pending},working={working}"
+                )
+        passive_bindings = tuple(
+            sorted(
+                binding.request.request_id
+                for binding in self._request_bindings.values()
+                if binding.stage == EXIT_STAGE and binding.kind in ("new", "cancel")
+            )
+        )
+        if violations or passive_bindings:
+            raise RuntimeError(
+                "normal exit drain barrier violated at "
+                f"{timestamp_ns}; controllers={violations}; "
+                f"pending_requests={passive_bindings}"
+            )
 
     def _cached_exit_target(
         self,
@@ -2513,10 +2636,13 @@ class S1EventLoop:
         after_cursor: EventCursor,
     ) -> None:
         adapter = self.risk_book_adapter
-        if adapter is None:
+        if adapter is None or self._exit_cutoff_applied:
             return
         product = self.products[product_id]
-        for venue, deadline_ns in ((SPOT, product.spot_session_end_time_ns),):
+        for venue, deadline_ns in (
+            (SPOT, product.spot_session_end_time_ns),
+            (FUTURE, product.future_session_end_time_ns),
+        ):
             exit_quote_change = getattr(
                 adapter,
                 "next_exit_quote_change_cursor",
@@ -2684,6 +2810,10 @@ class S1EventLoop:
                 request_class=request_class,
                 original_cursor=command.cursor,
                 stable_id=command.request_id,
+                cutoff_drain=(
+                    command.kind == "enqueue_cancel"
+                    and self._exit_cutoff_applied
+                ),
                 maker_side="ask",
                 absolute_price_tick=command.absolute_price_tick,
             )
@@ -2759,10 +2889,7 @@ class S1EventLoop:
             for source in request.sources
         )
         product = self.products[product_id]
-        effective_hedge_end_ns = max(
-            product.future_session_end_time_ns,
-            trigger_cursor.recv_time_ns + HEDGE_DELAY_NS,
-        )
+        effective_hedge_end_ns = product.future_session_end_time_ns
         intent = HedgeIntent(
             hedge_intent_id=request.request_id,
             trigger_cursor=trigger_cursor,
@@ -2775,10 +2902,7 @@ class S1EventLoop:
             initiating_first_leg_side="sell",
             initiating_first_leg_quantity=request.spot_exit_shares,
             initiating_first_leg_quantity_unit="spot_shares",
-            rollback_session_end_time_ns=max(
-                product.spot_session_end_time_ns,
-                effective_hedge_end_ns,
-            ),
+            rollback_session_end_time_ns=product.spot_session_end_time_ns,
         )
         arrival = capture_arrival_reference(
             self._risk_attempt_state(FUTURE, product_id, trigger_cursor),
@@ -2862,10 +2986,7 @@ class S1EventLoop:
                 trigger_cursor=request.trigger_cursor,
                 deadline_time_ns=min(
                     request.trigger_cursor.recv_time_ns + HEDGE_RETRY_NS,
-                    max(
-                        product.spot_session_end_time_ns,
-                        request.trigger_cursor.recv_time_ns,
-                    ),
+                    product.spot_session_end_time_ns,
                 ),
                 initiating_first_leg_venue=SPOT,
                 initiating_execution_id=source_execution_id,
@@ -3014,7 +3135,7 @@ class S1EventLoop:
             if binding.kind != "new":
                 raise RuntimeError("spot scheduler contains an invalid request kind")
             if binding.stage == EXIT_STAGE:
-                if self._expiry_due:
+                if self._exit_cutoff_applied or self._expiry_due:
                     return False
                 candidate_id = _required_text(
                     binding.candidate_intent_id,
@@ -5506,8 +5627,10 @@ def _external_sort_key(event: S1ExternalEvent) -> tuple[object, ...]:
         VenueBookUpdate: 0,
         EntryObservation: 1,
         EntryCutoff: 2,
-        SessionExpiry: 3,
-        ContractExpiry: 4,
+        ExitCutoff: 3,
+        ExitDrainBarrier: 4,
+        SessionExpiry: 5,
+        ContractExpiry: 6,
     }[type(event)]
     if isinstance(event, VenueBookUpdate):
         packet = event.event.book_cursor.packet_sequence
@@ -5798,6 +5921,8 @@ __all__ = [
     "EntryObservation",
     "EntryStateAdapter",
     "ExecutionAdapter",
+    "ExitCutoff",
+    "ExitDrainBarrier",
     "FillEvent",
     "NoFillAdapter",
     "NoOpExecutionAdapter",

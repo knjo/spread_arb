@@ -24,6 +24,13 @@ from .s1_scenario_spec import S1ScenarioSpec
 
 SESSION_START_SECOND: Final = 300
 ENTRY_STOP_SECOND: Final = 14_400
+# Stop normal exit-maker quoting before the 13:20 research horizon.  The
+# 15-second reserve covers a conservative three-second drain for at most 244
+# aggregate product cancels at 100 Spot requests/s, the 50 ms hedge delay,
+# five seconds of hedge retry, five seconds of rollback retry, and sub-second
+# scheduler/phase slack.  This is a risk-lifecycle bound, not an outcome-tuned
+# exit parameter.
+EXIT_STOP_SECOND: Final = 15_585
 SESSION_END_SECOND: Final = 15_600
 PRICE_EPSILON: Final = 1e-8
 
@@ -574,6 +581,7 @@ def _validate_state_invariants(frame: pl.DataFrame) -> None:
 
 __all__ = [
     "ENTRY_STOP_SECOND",
+    "EXIT_STOP_SECOND",
     "S1_COMMON_STATE_COLUMNS",
     "S1_DAY_STATE_COLUMNS",
     "SESSION_END_SECOND",

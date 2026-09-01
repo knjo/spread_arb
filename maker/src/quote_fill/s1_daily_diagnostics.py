@@ -19,7 +19,7 @@ from .s1_entry_day_runner import S1EntryDayRun
 from .s1_event_loop import RiskEvent
 from .s1_hedge import HEDGE_DELAY_NS
 
-DIAGNOSTICS_SCHEMA_VERSION: Final = "s1_daily_diagnostics_v2_economic_gate"
+DIAGNOSTICS_SCHEMA_VERSION: Final = "s1_daily_diagnostics_v3_exit_risk_guard"
 _UNRESOLVED_STATES: Final = frozenset(
     {
         "entry_hedge_timeout_unresolved",
@@ -49,6 +49,9 @@ _TOP_LEVEL_KEYS: Final = frozenset(
         "exit_physical_fill_count",
         "exit_physical_fill_shares",
         "exit_physical_fill_reason_counts",
+        "exit_desired_withdrawal_reason_counts",
+        "exit_cutoff_applied",
+        "exit_drain_barrier_applied",
         "risk_groups",
         "global_committed_peak_twd",
         "global_committed_end_twd",
@@ -240,6 +243,11 @@ def build_s1_daily_diagnostics(
             fill.fill_shares for fill in result.exit_physical_fills
         ),
         "exit_physical_fill_reason_counts": _counter_record(physical_fill_reasons),
+        "exit_desired_withdrawal_reason_counts": dict(
+            result.exit_desired_withdrawal_reason_counts
+        ),
+        "exit_cutoff_applied": result.exit_cutoff_applied,
+        "exit_drain_barrier_applied": result.exit_drain_barrier_applied,
         "risk_groups": risk_groups,
         "global_committed_peak_twd": peak_by_bucket,
         "global_committed_end_twd": end_by_bucket,
@@ -274,6 +282,7 @@ def validate_s1_daily_diagnostics(record: Mapping[str, object]) -> dict[str, obj
         "execution_role_counts",
         "position_state_counts",
         "exit_physical_fill_reason_counts",
+        "exit_desired_withdrawal_reason_counts",
     ):
         result[name] = _validated_counter(result[name], name)
     for name in (
@@ -291,6 +300,9 @@ def validate_s1_daily_diagnostics(record: Mapping[str, object]) -> dict[str, obj
         "naked_unresolved_notional_twd",
     ):
         _nonnegative_int(result[name], name)
+    for name in ("exit_cutoff_applied", "exit_drain_barrier_applied"):
+        if type(result[name]) is not bool:
+            raise S1DailyDiagnosticsError(f"{name} must be boolean")
     result["active_fill_latency_ms"] = _float_samples(
         result["active_fill_latency_ms"], "active_fill_latency_ms"
     )

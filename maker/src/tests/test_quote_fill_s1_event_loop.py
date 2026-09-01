@@ -30,6 +30,8 @@ from ..quote_fill.s1_event_loop import (
     ActualSendMakerSnapshot,
     ContractExpiry,
     EntryObservation,
+    ExitCutoff,
+    ExitDrainBarrier,
     PotentialEntryFill,
     S1CarryCodecError,
     S1CarryContractBinding,
@@ -1557,7 +1559,7 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
         self.assertTrue(specialized.exit_quote_calls)
         self.assertEqual(
             {call[0] for call in specialized.exit_quote_calls},
-            {"spot"},
+            {"spot", "future"},
         )
         self.assertTrue(
             any(
@@ -1578,6 +1580,164 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             trade_time,
         )
         self.assertEqual(specialized_result.positions[0].state, "exit_maker_flat")
+
+    def test_future_exit_book_closure_cancels_passive_spot_before_later_trade(
+        self,
+    ) -> None:
+        opened = observation(P1, 100)
+        entry_fill_time = 200
+        entry_hedge_time = entry_fill_time + HEDGE_DELAY_NS
+        future_closes = entry_hedge_time + 10_000_000
+        later_trade = future_closes + 10_000_000
+        books = ExitQuoteQueryRiskBooks(
+            {
+                ("spot", P1): (book("spot", P1, 90, packet=990).event,),
+                ("future", P1): (
+                    book("future", P1, 90, packet=991).event,
+                    book(
+                        "future",
+                        P1,
+                        future_closes,
+                        packet=992,
+                        legal=False,
+                    ).event,
+                ),
+            }
+        )
+
+        result = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (opened,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            risk_book_adapter=books,
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades((spot_trade(P1, later_trade),)),
+        ).run((opened, SessionExpiry(EventCursor(20_000_000_000, 30, 0))))
+
+        self.assertNotIn("exit_maker", [fact.role for fact in result.executions])
+        self.assertEqual(result.positions[0].state, "paired_open")
+        self.assertEqual(len(result.carry_out), 1)
+        self.assertEqual(
+            result.exit_desired_withdrawal_reason_counts,
+            (("gate:future_empty_book_side", 1),),
+        )
+        self.assertTrue(
+            any(
+                event.stage == "exit"
+                and event.request_class == "cancel"
+                and event.event_type == "actual_send"
+                for event in result.request_events
+            )
+        )
+        self.assertTrue(
+            any(call[0] == "future" for call in books.exit_quote_calls)
+        )
+
+    def test_direct_future_book_update_wakes_and_cancels_passive_spot(self) -> None:
+        opened = observation(P1, 100)
+        entry_hedge_time = 200 + HEDGE_DELAY_NS
+        future_closes = entry_hedge_time + 10_000_000
+        later_trade = future_closes + 10_000_000
+
+        result = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (opened,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades((spot_trade(P1, later_trade),)),
+        ).run(
+            (
+                book("future", P1, 90, packet=993),
+                book("spot", P1, 90, packet=994),
+                opened,
+                book(
+                    "future",
+                    P1,
+                    future_closes,
+                    packet=995,
+                    legal=False,
+                ),
+                SessionExpiry(EventCursor(20_000_000_000, 30, 0)),
+            )
+        )
+
+        self.assertNotIn("exit_maker", [fact.role for fact in result.executions])
+        self.assertEqual(result.positions[0].state, "paired_open")
+        self.assertEqual(
+            result.exit_desired_withdrawal_reason_counts,
+            (("gate:future_empty_book_side", 1),),
+        )
+
+    def test_exit_cutoff_cancels_passive_order_but_same_cursor_fill_wins(self) -> None:
+        opened = observation(P1, 100)
+        entry_fill_time = 200
+        entry_hedge_time = entry_fill_time + HEDGE_DELAY_NS
+        cutoff_time = entry_hedge_time + 10_000_000
+
+        result = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (opened,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades((spot_trade(P1, cutoff_time),)),
+        ).run(
+            (
+                book("future", P1, 90, packet=993),
+                book("spot", P1, 90, packet=994),
+                opened,
+                ExitCutoff(EventCursor(cutoff_time, 30, 0)),
+                ExitDrainBarrier(EventCursor(cutoff_time + 100_000_000, 30, 0)),
+                SessionExpiry(EventCursor(20_000_000_000, 30, 0)),
+            )
+        )
+
+        self.assertEqual(result.positions[0].state, "exit_maker_flat")
+        self.assertIn("exit_maker", [fact.role for fact in result.executions])
+        self.assertIn("exit_hedge", [fact.role for fact in result.executions])
+        cancel = next(
+            event
+            for event in result.request_events
+            if event.stage == "exit"
+            and event.request_class == "cancel"
+            and event.event_type == "actual_send"
+        )
+        self.assertEqual(cancel.event_cursor.recv_time_ns, cutoff_time)
+        self.assertEqual(
+            result.exit_desired_withdrawal_reason_counts,
+            (("safety_cutoff", 1),),
+        )
+        self.assertTrue(result.exit_cutoff_applied)
+        self.assertTrue(result.exit_drain_barrier_applied)
+
+    def test_exit_drain_barrier_fails_if_cancel_has_not_actually_sent(self) -> None:
+        opened = observation(P1, 100)
+        exit_new_time = 1_000_000_100
+        cutoff_time = exit_new_time + 10_000_000
+        barrier_time = cutoff_time + 10_000_000
+
+        loop = S1EventLoop(
+            config(spot_request_cap=1),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (opened,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades(()),
+        )
+        with self.assertRaisesRegex(RuntimeError, "exit drain barrier violated"):
+            loop.run(
+                (
+                    book("future", P1, 90, packet=996),
+                    book("spot", P1, 90, packet=997),
+                    opened,
+                    ExitCutoff(EventCursor(cutoff_time, 30, 0)),
+                    ExitDrainBarrier(EventCursor(barrier_time, 30, 0)),
+                    SessionExpiry(EventCursor(20_000_000_000, 30, 0)),
+                )
+            )
+
 
     def test_exit_refresh_builds_one_target_per_cursor_and_frozen_lower(self) -> None:
         first = observation(P1, 100, snapshot=601)

@@ -44,6 +44,12 @@ class S1DailyDiagnosticsTest(unittest.TestCase):
         self.assertEqual(record["carry_out_positions"], 1)
         self.assertGreater(record["carry_out_notional_twd"], 0)
         self.assertEqual(record["naked_unresolved_positions"], 0)
+        self.assertEqual(
+            record["exit_desired_withdrawal_reason_counts"],
+            {"safety_cutoff": 1},
+        )
+        self.assertTrue(record["exit_cutoff_applied"])
+        self.assertTrue(record["exit_drain_barrier_applied"])
         self.assertEqual(validate_s1_daily_diagnostics(record), record)
 
     def test_rejects_schema_counter_and_sample_tamper(self) -> None:

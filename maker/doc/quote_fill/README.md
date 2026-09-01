@@ -22,7 +22,8 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 | [FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md](FUTURE_ASK_L1_L5_INDEXED_DIAGNOSTIC_20260821.md) | 五日 ASK1–2 vs ASK3–5 | 同上 |
 | [AUGUST_ATTRIBUTION_20260824.md](AUGUST_ATTRIBUTION_20260824.md) | S0 q95 raw-excursion touch vs post-touch queue 歸因、30-session sensitivity | **完成；兩者並列** |
 | [FOUNDATION_SELECTION_S05_REBUILD_20260826.md](FOUNDATION_SELECTION_S05_REBUILD_20260826.md) | S0.5 從頭選 15s anchor／Q2 trail20、S1 mother並重算frozen lower | 完整完成；證據已由cost-aware S1 grid採用 |
-| [S1_COST_AWARE_IMPLEMENTATION_20260831.md](S1_COST_AWARE_IMPLEMENTATION_20260831.md) | 新七組、成本gate、absolute exit、20M cap、path與publication preflight | **程式與359項回歸完成；尚無正式績效** |
+| [S1_COST_AWARE_IMPLEMENTATION_20260831.md](S1_COST_AWARE_IMPLEMENTATION_20260831.md) | 新七組、成本gate、absolute exit、exit risk guard、20M cap、path與publication preflight | **程式與363項回歸完成；尚無正式績效** |
+| [S1_PAUSE_STATUS_20260901.md](S1_PAUSE_STATUS_20260901.md) | `944c0ac`首次smoke blocker、2354根因與後續guard | 歷史稽核；研究已恢復，待新smoke |
 | [S1_STOP_CLEANUP_20260831.md](S1_STOP_CLEANUP_20260831.md) | 舊 S1 最終停止狀態、保留／清除項目與重啟條件 | 歷史快照；重啟條件已由cost-aware實作承接 |
 | [S1_PAUSED_STATUS_20260829.md](S1_PAUSED_STATUS_20260829.md) | 舊 S1 77／497 partial 的停止原因、11 日方向性摘要與成本感知重啟條件 | 歷史紀錄；bundle 已清除 |
 | [FOUNDATION_REVALIDATION_S05_20260825.md](FOUNDATION_REVALIDATION_S05_20260825.md) | 舊 EWMA120 基礎重驗與重作理由 | 歷史 predecessor；不得作現行 S1 lookup |

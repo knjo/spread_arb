@@ -283,6 +283,8 @@ def _prepared(
         entry_product_ids=(value_code,),
         day_open_time_ns=recv_ns - 1_000_000_000,
         entry_cutoff_time_ns=recv_ns + 10_000_000_000,
+        exit_cutoff_time_ns=session_expiry_ns - 1_000_000_000,
+        exit_drain_barrier_time_ns=session_expiry_ns - 500_000_000,
         session_expiry_time_ns=session_expiry_ns,
     )
 
@@ -638,6 +640,10 @@ class S1PortfolioRunnerTest(unittest.TestCase):
                         entry_product_ids=first.entry_product_ids,
                         day_open_time_ns=first.day_open_time_ns,
                         entry_cutoff_time_ns=first.entry_cutoff_time_ns,
+                        exit_cutoff_time_ns=first.exit_cutoff_time_ns,
+                        exit_drain_barrier_time_ns=(
+                            first.exit_drain_barrier_time_ns
+                        ),
                         session_expiry_time_ns=first.session_expiry_time_ns,
                     ),
                 )

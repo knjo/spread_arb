@@ -25,6 +25,12 @@ dispatch後仍失敗就原子式 timeout並走共同 emergency rollback。不得
 每筆另存 `t0` book status、actual send／book cursor、retry delay、on-time／delayed／timeout、arrival reference
 coverage、slippage與rollback outcome；null reference／slippage不得補 0。
 
+## S1 exit pre-fill hedgeability guard
+
+第一條normal exit的Spot Ask absolute price／tick仍在entry actual-send凍結，不跟行情重定價；但被動單工作期間必須同時滿足Spot maker book合法，以及一口Future buy在當下causal L1-L5可完整執行。Spot或Future任一book變化都要喚醒reconciliation；Future gate關閉只撤回desired／送cancel，恢復時也只能回原凍結價。
+
+這是pre-fill風險控制，不是Future liquidity reservation或成交保證，也不取代B6。Actual cancel effect前發生的Spot maker fill仍成立，並從該fill cursor +50 ms獨立執行上述hedge／retry／rollback。報表以`exit_desired_withdrawal_reason_counts`分開列出`gate:future_*`、`safety_cutoff`等撤回原因；任何最終裸腿維持fail closed。
+
 ## 四條路徑
 
 | Maker fill | Taker hedge |

@@ -21,7 +21,7 @@ src/
 │   │              foundation_selection_stats／registry → foundation_selection_runner
 │   ├── S0.5 frozen lower v2：foundation_frozen_convergence_runner
 │   │                            （已canonical發布的upper-touch frozen supplement）
-│   ├── cost-aware S1：s1_scenario_spec／s1_target／s1_economic_gate
+│   ├── cost-aware S1：s1_scenario_spec／s1_target／s1_economic_gate／exit pre-fill risk guard
 │   │                  → s1_entry_state_adapter／s1_event_loop／s1_entry_day_runner
 │   │                  → s1_bundle_artifacts／s1_performance／s1_open_position_valuation
 │   │                  → s1_publication_gate

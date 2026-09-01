@@ -49,6 +49,7 @@ prepared loader 的實際 source path還要逐 role 與 manifest完全相等。
 - TrialMatch row 不可先刪掉再 as-of；需保留最新 raw state 並跨市場關閉 route。
 - 非零回到零後，等新的正式有效 book 才重新開放。
 - Gate 在 working order 期間失效會觸發 cancel；cancel race fill 不得刪除。
+- Maker+taker route工作期間須同時重驗maker venue與hedge side的完整可執行depth；任一venue raw book change都要喚醒。Gate關閉只建立causal cancel intent，actual cancel effect前或同cursor的真實fill不得hindsight刪除。
 - Maker 已 fill 後 gate 失效需記 hedge failure／emergency outcome，不可 hindsight drop。
 
 另排除零價有量、crossed book、缺 RefPrice 與不足 hedge depth。Book age 不可在 raw 前處理直接刪除；主政策與 100／250／500／1,000／5,000 ms sensitivity 分開保存。

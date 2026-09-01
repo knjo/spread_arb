@@ -113,16 +113,21 @@ def build_s1_spot_ask_target(
 
     spot_reason = _spot_book_reason(spot_book, observation_cursor)
     future_exec = None
+    future_reason: str | None = None
     if future_book is not None and future_book.book_cursor.cursor > observation_cursor:
         raise ValueError("future book cannot follow the observation cursor")
-    if future_book is not None:
-        future_exec, _ = executable_book(
+    if future_book is None:
+        future_reason = "missing_future_book"
+    else:
+        future_exec, raw_future_reason = executable_book(
             future_book,
             side="buy",
             quantity=future_contracts,
             quantity_unit="future_contracts",
             send_eligible_cursor=observation_cursor,
         )
+        if future_exec is None:
+            future_reason = f"future_{raw_future_reason or 'not_executable'}"
 
     effective_basis = (
         None
@@ -158,7 +163,11 @@ def build_s1_spot_ask_target(
         elif not in_band:
             target_reason = "target_outside_reference_band"
 
-    reason = spot_reason or target_reason or "eligible"
+    # A passive Spot first leg must not remain exposed while its immediate
+    # Future-buy hedge is already known to be unexecutable.  B6 still performs
+    # the independent t0/+5s execution decision after an actual maker fill;
+    # this is a pre-fill risk gate, not a substitute execution price.
+    reason = spot_reason or future_reason or target_reason or "eligible"
     return S1SpotAskTarget(
         date=date,
         value_code=value_code,

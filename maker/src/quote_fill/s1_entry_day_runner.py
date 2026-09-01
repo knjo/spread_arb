@@ -52,6 +52,7 @@ from .policy_spec import (
 from .s1_accounting_bridge import S1AccountingBridge, S1AccountingProduct
 from .s1_day_state import (
     ENTRY_STOP_SECOND,
+    EXIT_STOP_SECOND,
     SESSION_END_SECOND,
     SESSION_START_SECOND,
     build_s1_policy_state_changes,
@@ -62,6 +63,8 @@ from .s1_entry_state_adapter import S1EntryStateAdapter, merge_entry_events
 from .s1_event_loop import (
     ContractExpiry,
     EntryCutoff,
+    ExitCutoff,
+    ExitDrainBarrier,
     S1CarryContractBinding,
     S1CarryPosition,
     S1EventLoop,
@@ -70,7 +73,7 @@ from .s1_event_loop import (
     S1ReplayResult,
     SessionExpiry,
 )
-from .s1_hedge import HEDGE_DELAY_NS
+from .s1_hedge import HEDGE_DELAY_NS, HEDGE_RETRY_NS
 from .s1_makerfill_bridge import S1MakerFillBridge
 from .s1_raw_book_adapter import (
     RawBookDayIndex,
@@ -88,7 +91,7 @@ from .s1_spot_trade_adapter import (
     build_spot_trade_day_index_from_scan,
 )
 
-RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v4_frozen_absolute_exit"
+RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v5_exit_risk_guard"
 DEVELOPMENT_END_DATE: Final = "20260813"
 ONE_SECOND_NS: Final = 1_000_000_000
 SPOT_CLOSE_DELAY_SECONDS: Final = 600
@@ -222,6 +225,8 @@ class PreparedS1EntryDay:
     entry_product_ids: tuple[str, ...]
     day_open_time_ns: int
     entry_cutoff_time_ns: int
+    exit_cutoff_time_ns: int
+    exit_drain_barrier_time_ns: int
     session_expiry_time_ns: int
     source_paths: Mapping[str, Path] = field(default_factory=dict, repr=False)
 
@@ -286,8 +291,12 @@ class PreparedS1EntryDay:
             raise ValueError("entry cutoff must be a positive timestamp")
         if self.entry_cutoff_time_ns <= self.day_open_time_ns:
             raise ValueError("entry cutoff must follow day open")
-        if self.session_expiry_time_ns <= self.entry_cutoff_time_ns:
-            raise ValueError("session expiry must follow entry cutoff")
+        if self.exit_cutoff_time_ns <= self.entry_cutoff_time_ns:
+            raise ValueError("exit cutoff must follow entry cutoff")
+        if self.exit_drain_barrier_time_ns <= self.exit_cutoff_time_ns:
+            raise ValueError("exit drain barrier must follow exit cutoff")
+        if self.session_expiry_time_ns <= self.exit_drain_barrier_time_ns:
+            raise ValueError("session expiry must follow exit drain barrier")
         expiry_product_ids = tuple(
             sorted(
                 product.product_id
@@ -506,7 +515,11 @@ def prepare_s1_entry_day(
     identities = _validated_product_identities(common, mapping, product_keys)
     open_time_ns = _session_open_time_ns(common)
     entry_cutoff_time_ns = open_time_ns + ENTRY_STOP_SECOND * ONE_SECOND_NS
+    exit_cutoff_time_ns = open_time_ns + EXIT_STOP_SECOND * ONE_SECOND_NS
     session_expiry_time_ns = open_time_ns + SESSION_END_SECOND * ONE_SECOND_NS
+    exit_drain_barrier_time_ns = session_expiry_time_ns - (
+        HEDGE_DELAY_NS + 2 * HEDGE_RETRY_NS
+    )
     spot_raw_scan = pl.scan_parquet(source_paths["spot_raw"])
     future_raw_scan = pl.scan_parquet(source_paths["future_raw"])
     if required_bindings:
@@ -586,6 +599,8 @@ def prepare_s1_entry_day(
         entry_product_ids=tuple(product_codes),
         day_open_time_ns=open_time_ns,
         entry_cutoff_time_ns=entry_cutoff_time_ns,
+        exit_cutoff_time_ns=exit_cutoff_time_ns,
+        exit_drain_barrier_time_ns=exit_drain_barrier_time_ns,
         session_expiry_time_ns=session_expiry_time_ns,
         source_paths=source_paths,
     )
@@ -637,6 +652,10 @@ def run_s1_entry_policy(
         entry_state.iter_observations(prepared.state_changes_by_policy[policy_id]),
         (
             EntryCutoff(EventCursor(prepared.entry_cutoff_time_ns, 10, 1)),
+            ExitCutoff(EventCursor(prepared.exit_cutoff_time_ns, 10, 1)),
+            ExitDrainBarrier(
+                EventCursor(prepared.exit_drain_barrier_time_ns, 10, 1)
+            ),
             SessionExpiry(EventCursor(prepared.session_expiry_time_ns, 10, 1)),
         ),
     )

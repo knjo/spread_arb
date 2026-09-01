@@ -263,6 +263,8 @@ def _prepared(
         entry_product_ids=("2330",),
         day_open_time_ns=recv_ns - 1_000_000_000,
         entry_cutoff_time_ns=recv_ns + 10_000_000_000,
+        exit_cutoff_time_ns=expiry - 1_000_000_000,
+        exit_drain_barrier_time_ns=expiry - 500_000_000,
         session_expiry_time_ns=expiry,
     )
 

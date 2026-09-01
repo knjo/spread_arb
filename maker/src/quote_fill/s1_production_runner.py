@@ -76,6 +76,7 @@ from .s1_daily_diagnostics import (
     build_s1_daily_diagnostics,
     validate_s1_daily_diagnostics,
 )
+from .s1_day_state import ENTRY_STOP_SECOND, EXIT_STOP_SECOND, SESSION_END_SECOND
 from .s1_economic_gate import S1EconomicGateAudit, S1EconomicGateEstimate
 from .s1_entry_day_runner import (
     PreparedS1EntryDay,
@@ -93,6 +94,7 @@ from .s1_event_loop import (
     encode_s1_carry_contract_binding,
     encode_s1_carry_position,
 )
+from .s1_hedge import HEDGE_DELAY_NS, HEDGE_RETRY_NS
 from .s1_open_position_valuation import (
     COMMON_HORIZON_ASOF_ID,
     COMMON_HORIZON_CURSOR,
@@ -136,19 +138,19 @@ from .s1_scenario_spec import (
 from .transaction_costs import TransactionCostProfile
 
 PRODUCTION_RUNNER_VERSION: Final = (
-    "s1_spot_bid_cost_aware_71x7_v5_common_horizon_mark"
+    "s1_spot_bid_cost_aware_71x7_v6_exit_risk_guard"
 )
 RUN_CONFIG_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_run_config_v4_common_horizon_mark"
+    "s1_spot_bid_run_config_v5_exit_risk_guard"
 )
 FINAL_BUNDLE_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_complete_v4_common_horizon_mark"
+    "s1_spot_bid_complete_v5_exit_risk_guard"
 )
-RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v4_common_horizon_mark"
+RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v5_exit_risk_guard"
 DAILY_METRICS_SCHEMA_VERSION: Final = "s1_spot_bid_daily_v2_cost_aware"
 COMMON_POPULATION_SCHEMA_VERSION: Final = "s1_common_population_date_value_quote_tod_v1"
 VERIFICATION_SCHEMA_VERSION: Final = "s1_production_verification_v2_source_bound"
-VERIFIER_VERSION: Final = "s1_production_deep_verifier_v2_common_horizon_mark"
+VERIFIER_VERSION: Final = "s1_production_deep_verifier_v3_exit_risk_guard"
 VERIFICATION_FILENAME: Final = "verification.json"
 ROUTE_ID: Final = "spot_bid_future_taker__spot_ask_future_taker_exit"
 ENTRY_FILL_TRUTH: Final = "approximate"
@@ -158,10 +160,13 @@ DEFAULT_OUTPUT_ROOT: Final = (
     MAKER_ROOT
     / "data"
     / "walkforward"
-    / "s1_spot_bid_cost_aware_20260901_v1_common_horizon_mark"
+    / "s1_spot_bid_cost_aware_20260901_v2_exit_risk_guard"
 )
 DEFAULT_REPORT_PATH: Final = (
-    MAKER_ROOT / "doc" / "quote_fill" / "POLICY_COMPARISON_SPOT_BID_20260901.md"
+    MAKER_ROOT
+    / "doc"
+    / "quote_fill"
+    / "POLICY_COMPARISON_SPOT_BID_20260901_V2_EXIT_RISK_GUARD.md"
 )
 CAPACITY_REGISTRY_FILENAME: Final = "capacity_identity_registry.sqlite"
 GENESIS_PARTITION_SHA256: Final = hashlib.sha256(
@@ -396,6 +401,38 @@ def _semantic_run_config(
             "actual_new_send_frozen_absolute_spot_ask_price_and_tick"
         ),
         "exit_target_repricing_after_entry": False,
+        "exit_pre_fill_hedgeability_gate": {
+            "required": True,
+            "maker_venue": "spot",
+            "hedge_venue": "future",
+            "hedge_side": "buy",
+            "quantity": "one_position_future_contracts",
+            "wake_venues": ["spot", "future"],
+            "semantics": (
+                "passive_spot_exit_requires_current_causal_full_depth_future_buy;"
+                "actual_fill_still_uses_independent_t0_plus_retry_b6"
+            ),
+        },
+        "exit_safety_cutoff": {
+            "seconds_from_open": EXIT_STOP_SECOND,
+            "research_horizon_seconds_from_open": SESSION_END_SECOND,
+            "reserve_seconds": SESSION_END_SECOND - EXIT_STOP_SECOND,
+            "drain_barrier_ns_from_open": (
+                SESSION_END_SECOND * 1_000_000_000
+                - HEDGE_DELAY_NS
+                - 2 * HEDGE_RETRY_NS
+            ),
+            "drain_barrier_clock": "13:19:49.950 Asia/Taipei",
+            "passive_orders_must_be_terminal_at_barrier": True,
+            "risk_deadlines_clipped_to_research_horizon": True,
+            "maximum_aggregate_product_orders": 244,
+            "spot_cancel_request_limit_per_second": 100,
+            "hedge_delay_ms": 50,
+            "hedge_retry_ms": 5_000,
+            "rollback_retry_ms": 5_000,
+            "same_cursor_fill_precedes_cancel": True,
+            "rule_id": "exit_maker_pre_horizon_risk_drain_v1",
+        },
         "entry_fill_truth": ENTRY_FILL_TRUTH,
         "entry_fill_cursor_exact": False,
         "own_quantity_included": False,
@@ -899,6 +936,21 @@ def _validate_prepared_day(
         raise S1ProductionRunError("prepare_day returned the wrong date/type")
     if prepared.policy_ids != SCENARIO_IDS:
         raise S1ProductionRunError("prepared day lacks the canonical seven policies")
+    expected_expiry_ns = (
+        prepared.day_open_time_ns + SESSION_END_SECOND * 1_000_000_000
+    )
+    expected_barrier_ns = expected_expiry_ns - (
+        HEDGE_DELAY_NS + 2 * HEDGE_RETRY_NS
+    )
+    if (
+        prepared.entry_cutoff_time_ns
+        != prepared.day_open_time_ns + ENTRY_STOP_SECOND * 1_000_000_000
+        or prepared.exit_cutoff_time_ns
+        != prepared.day_open_time_ns + EXIT_STOP_SECOND * 1_000_000_000
+        or prepared.exit_drain_barrier_time_ns != expected_barrier_ns
+        or prepared.session_expiry_time_ns != expected_expiry_ns
+    ):
+        raise S1ProductionRunError("prepared production clock contract drifted")
     entry_product_ids = frozenset(prepared.entry_product_ids)
     for product in prepared.products:
         if product.product_id != product.value_code or product.future_contracts != 1:
@@ -1678,6 +1730,10 @@ def _validate_production_daily_run(
     )
     if not result.normal_exit_enabled:
         raise S1ProductionRunError("canonical S1 replay requires normal exit")
+    if not result.exit_cutoff_applied or not result.exit_drain_barrier_applied:
+        raise S1ProductionRunError(
+            "canonical S1 replay requires the exit cutoff and drain barrier"
+        )
     if result.carry_in != tuple(opening_carry):
         raise S1ProductionRunError("daily carry_in differs from portfolio state")
     opening_products = frozenset(value.product_id for value in opening_carry)
@@ -2609,6 +2665,7 @@ def _aggregate_daily_diagnostics(
         "request_counts",
         "execution_role_counts",
         "exit_physical_fill_reason_counts",
+        "exit_desired_withdrawal_reason_counts",
     )
     counters: dict[str, Counter[str]] = {name: Counter() for name in counter_names}
     fill_latency: list[float] = []
@@ -2837,6 +2894,12 @@ def _aggregate_daily_diagnostics(
         ),
         "naked_unresolved_notional_twd_max": max(
             int(record["naked_unresolved_notional_twd"]) for record in validated
+        ),
+        "exit_cutoff_sessions": sum(
+            bool(record["exit_cutoff_applied"]) for record in validated
+        ),
+        "exit_drain_barrier_sessions": sum(
+            bool(record["exit_drain_barrier_applied"]) for record in validated
         ),
         "global_committed_bucket_peaks_twd": {
             bucket: max(
@@ -3156,6 +3219,32 @@ def _render_report(
             (
                 "Target-rank 分母是 makerFill assessments；它不等於 sent orders、"
                 "makerFill-supported orders 或 active fills，這些分母仍在上一表分開列示。"
+            ),
+            "",
+            "## Exit pre-fill risk guard 診斷",
+            "",
+            "| scenario | cutoff/barrier sessions | desired-withdrawal reasons | withdrawals |",
+            "|---|---:|---|---:|",
+        ]
+    )
+    for policy_id in SCENARIO_IDS:
+        withdrawal_counts = _nonnegative_count_items(
+            diagnostics[policy_id]["exit_desired_withdrawal_reason_counts"],
+            f"{policy_id} exit_desired_withdrawal_reason_counts",
+        )
+        lines.append(
+            f"| {policy_id} | {diagnostics[policy_id]['exit_cutoff_sessions']}/"
+            f"{diagnostics[policy_id]['exit_drain_barrier_sessions']} | "
+            f"{_count_items_text(withdrawal_counts)} | "
+            f"{sum(count for _, count in withdrawal_counts)} |"
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "`gate:future_*` 表示被動 Spot exit 因當下 Future buy 不可完整執行而撤回；"
+                "`safety_cutoff` 是 13:19:45 的固定事前撤單。actual cancel effect 前的真實 "
+                "Spot fill 仍成立並走獨立 B6 hedge／rollback；任何最終裸腿仍 fail-closed。"
             ),
             "",
             "## 執行與容量診斷",
