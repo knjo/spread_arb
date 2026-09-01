@@ -27,9 +27,9 @@ coverage、slippage與rollback outcome；null reference／slippage不得補 0。
 
 ## S1 exit pre-fill hedgeability guard
 
-第一條normal exit的Spot Ask absolute price／tick仍在entry actual-send凍結，不跟行情重定價；但被動單工作期間必須同時滿足Spot maker book合法，以及一口Future buy在當下causal L1-L5可完整執行。Spot或Future任一book變化都要喚醒reconciliation；Future gate關閉只撤回desired／送cancel，恢復時也只能回原凍結價。
+第一條normal exit的Spot Ask absolute price／tick仍在entry actual-send凍結，不跟行情重定價；但被動單工作期間必須同時滿足Spot maker book合法、一口Future buy在當下causal L1-L5可完整執行，以及最差swept ask上方仍保留至少一個嚴格位於合法band內的Future tick。Spot或Future任一book變化都要喚醒reconciliation；Future gate關閉只撤回desired／送cancel，恢復時也只能回原凍結價。
 
-這是pre-fill風險控制，不是Future liquidity reservation或成交保證，也不取代B6。Actual cancel effect前發生的Spot maker fill仍成立，並從該fill cursor +50 ms獨立執行上述hedge／retry／rollback。報表以`exit_desired_withdrawal_reason_counts`分開列出`gate:future_*`、`safety_cutoff`等撤回原因；任何最終裸腿維持fail closed。
+這是針對已觀察到上緣邊界風險的pre-fill控制，不是Future liquidity reservation或成交保證，也不取代B6，更不保證零leg risk。Actual cancel effect前發生的Spot maker fill仍成立，並從該fill cursor +50 ms獨立執行上述hedge／retry／rollback。報表以`exit_desired_withdrawal_reason_counts`分開列出`gate:future_upper_band_headroom_lt_1_tick`、其他`gate:future_*`與`safety_cutoff`等撤回原因；任何最終裸腿維持fail closed。
 
 ## 四條路徑
 

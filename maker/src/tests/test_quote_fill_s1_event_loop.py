@@ -1670,6 +1670,52 @@ class S1EventLoopAcceptanceTest(unittest.TestCase):
             (("gate:future_empty_book_side", 1),),
         )
 
+    def test_future_last_legal_ask_wakes_and_cancels_passive_spot(self) -> None:
+        opened = observation(P1, 100)
+        entry_hedge_time = 200 + HEDGE_DELAY_NS
+        future_reaches_last_legal_tick = entry_hedge_time + 10_000_000
+        later_trade = future_reaches_last_legal_tick + 10_000_000
+
+        result = S1EventLoop(
+            config(),
+            (product(P1),),
+            entry_state_adapter=TimelineStateAdapter({P1: (opened,)}),
+            fill_adapter=RelativeFillAdapter({P1: 100}),
+            normal_exit_enabled=True,
+            spot_trade_adapter=SyntheticSpotTrades((spot_trade(P1, later_trade),)),
+        ).run(
+            (
+                # With ref=100 and the pre-2026-07-06 futures ladder, 107.5
+                # is the final legal tick below the strict 108.0 upper band.
+                book("future", P1, 90, packet=996, ask_price=107.0),
+                book("spot", P1, 90, packet=997),
+                opened,
+                book(
+                    "future",
+                    P1,
+                    future_reaches_last_legal_tick,
+                    packet=998,
+                    ask_price=107.5,
+                ),
+                SessionExpiry(EventCursor(20_000_000_000, 30, 0)),
+            )
+        )
+
+        self.assertNotIn("exit_maker", [fact.role for fact in result.executions])
+        self.assertEqual(result.positions[0].state, "paired_open")
+        self.assertEqual(
+            result.exit_desired_withdrawal_reason_counts,
+            (("gate:future_upper_band_headroom_lt_1_tick", 1),),
+        )
+        self.assertTrue(
+            any(
+                event.stage == "exit"
+                and event.request_class == "cancel"
+                and event.event_type == "actual_send"
+                for event in result.request_events
+            )
+        )
+
     def test_exit_cutoff_cancels_passive_order_but_same_cursor_fill_wins(self) -> None:
         opened = observation(P1, 100)
         entry_fill_time = 200

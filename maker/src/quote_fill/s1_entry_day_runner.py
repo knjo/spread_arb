@@ -91,7 +91,7 @@ from .s1_spot_trade_adapter import (
     build_spot_trade_day_index_from_scan,
 )
 
-RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v5_exit_risk_guard"
+RUNNER_VERSION: Final = "s1_entry_day_joint_clock_v6_exit_headroom_guard"
 DEVELOPMENT_END_DATE: Final = "20260813"
 ONE_SECOND_NS: Final = 1_000_000_000
 SPOT_CLOSE_DELAY_SECONDS: Final = 600

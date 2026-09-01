@@ -21,12 +21,13 @@ def _book(
     asks: tuple[tuple[float, int], ...],
     gate_open: bool = True,
     reason: str | None = None,
+    reference_price: float = 100.0,
 ) -> CausalBookState:
     return CausalBookState(
         RawBookCursor(EventCursor(cursor_ns), 1),
         gate_open,
         reason,
-        100.0 if gate_open else None,
+        reference_price if gate_open else None,
         tuple(RawBookLevel(*level) for level in bids),
         tuple(RawBookLevel(*level) for level in asks),
     )
@@ -234,6 +235,56 @@ class S1SpotAskTargetTest(unittest.TestCase):
         )
         self.assertIsNone(missing.effective_exit_basis_bp)
         self.assertIsNone(missing.future_book_cursor)
+
+    def test_future_buy_requires_one_legal_tick_below_upper_band(self) -> None:
+        cursor = EventCursor(200)
+        spot = _book(
+            190,
+            bids=((57.1, 2_000),),
+            asks=((57.2, 3_000),),
+            reference_price=53.2,
+        )
+
+        def observe(
+            future_asks: tuple[tuple[float, int], ...],
+            *,
+            future_contracts: int = 1,
+        ):
+            return build_s1_spot_ask_target(
+                date="20260505",
+                value_code="2354",
+                quote_code="GCFE6",
+                position_id="position-1",
+                scenario_id="q95/spot-ask",
+                observation_cursor=cursor,
+                frozen_exit_threshold_basis_bp=0.0,
+                frozen_exit_target_price=57.2,
+                frozen_exit_absolute_price_tick=absolute_price_tick(57.2),
+                spot_book=spot,
+                future_book=_book(
+                    191,
+                    bids=((57.4, 5),),
+                    asks=future_asks,
+                    reference_price=53.4,
+                ),
+                future_contracts=future_contracts,
+            )
+
+        one_tick = observe(((57.5, 5),))
+        no_ticks = observe(((57.6, 5),))
+        deep_sweep_no_ticks = observe(
+            ((57.5, 1), (57.6, 1)),
+            future_contracts=2,
+        )
+
+        self.assertTrue(one_tick.gate_open)
+        for blocked in (no_ticks, deep_sweep_no_ticks):
+            self.assertFalse(blocked.gate_open)
+            self.assertEqual(
+                blocked.gate_reason,
+                "future_upper_band_headroom_lt_1_tick",
+            )
+        self.assertEqual(no_ticks.target_price, one_tick.target_price)
 
     def test_frozen_price_tick_mismatch_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "price/tick mismatch"):

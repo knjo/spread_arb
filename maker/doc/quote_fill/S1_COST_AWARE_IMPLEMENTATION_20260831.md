@@ -7,7 +7,7 @@ causal executable prices與使用者成本決定「這次是否值得送」，�
 replay。本文只記錄已凍結的實作契約，**不是71日研究結果，也不是 deployment GO**。
 
 截至本文件更新，scenario／成本／absolute exit／B6／capacity／path／artifact／publication、8/13 common-horizon
-open valuation、exit pre-fill risk guard與持久化verification receipt程式均已完成，完整S1回歸363項及path contract 19項通過；clean-source smoke、497 partitions與獨立
+open valuation、exit pre-fill headroom guard與持久化verification receipt程式均已完成，完整S1回歸365項及path contract 19項通過；clean-source smoke、497 partitions與獨立
 input-content verify仍待完成。正式 report完成前不得引用
 champion、Pareto或S2 shortlist。
 
@@ -51,13 +51,16 @@ Financing、borrow、futures margin opportunity cost與live reject／latency仍�
 
 - Entry是 `Spot Bid maker → Future sell taker`；legacy makerFill只提供approximate full-fill screen。
 - `actual_new_send_time`同時凍結entry Future Bid／Ask、lower provenance、absolute Spot Ask exit price與tick。
-- Normal exit是 `Spot Ask maker → Future buy taker`。Absolute Spot Ask price／tick維持凍結，不因後續行情重定價；但被動單只有在Spot maker book合法且Future buy L1-L5足以完整買足該position時才可工作。Spot或Future任一book變化都會喚醒重驗；Future gate關閉時撤回desired／送cancel，恢復後仍只可回原凍結價。
-- 這個pre-fill hedgeability gate不是流動性預留，也不取代B6。若Spot maker在actual cancel effect前仍真實成交，fill依舊成立，並從fill+50 ms獨立判定Future hedge、最多retry 5秒，失敗再rollback。
+- Normal exit是 `Spot Ask maker → Future buy taker`。Absolute Spot Ask price／tick維持凍結，不因後續行情重定價；但被動單只有在Spot maker book合法、Future buy L1-L5足以完整買足該position，且最差swept ask上方仍保留至少一個嚴格位於Future合法價格band內的tick時才可工作。Spot或Future任一book變化都會喚醒重驗；Future gate關閉時撤回desired／送cancel，恢復後仍只可回原凍結價。
+- 這個pre-fill hedgeability／headroom gate不是流動性預留，也不取代B6。它只修正目前可辨識的上緣邊界風險，不保證零leg risk。若Spot maker在actual cancel effect前仍真實成交，fill依舊成立，並從fill+50 ms獨立判定Future hedge、最多retry 5秒，失敗再rollback。
 - S1 carry route在13:19:45固定開始撤除所有passive exit desired；13:19:49.950的最晚安全成交barrier要求所有passive lifecycle已terminal，否則partition fail closed。Actual cancel effect前或同cursor的fill仍先於cancel。這不是S4 taker+taker hard flatten，也不能保證市場同步消失時永無裸腿。
 - Hedge先在trigger+50 ms判定；不可執行或venue額度不足時，往後最多5秒找第一個合法足量且可送cursor。Timeout後走共同rollback。
 - 20M global／10M product reservation在entry new actual-send前成立；maker fill只把reservation轉為exposure，完整exit hedge後才釋放。
 - Expiry paired residual使用使用者指定的spot-close／spot-close、basis=0 accounting convention；不是execution fill或same-day completion。
 - 任何最終`entry_hedge_timeout_unresolved`／`exit_rollback_failed_unresolved`都保留裸腿與committed capacity，並封鎖economic ranking；不得用8/13 common-horizon mark或expiry basis=0洗平。
+
+報表另以`exit_desired_withdrawal_reason_counts`揭露guard影響；上緣buffer關閉固定記為
+`gate:future_upper_band_headroom_lt_1_tick`，不得併入一般無深度或`safety_cutoff`。
 
 ## 8/13共同 ranking horizon
 

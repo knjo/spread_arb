@@ -4,7 +4,7 @@
 
 決策基線：nested repo commit `0c3e5ad`
 
-狀態（2026-09-01 修訂）：**S0與S0.5完整完成；cost-aware S1 七組、absolute frozen exit、20M chronological cap、B6 retry、成本 ledger、SSD2／NAS input contract、8/13 common-horizon valuation、exit pre-fill risk guard、fail-closed publication gate與source-bound verification receipt均已完成程式接線，完整S1回歸363項通過。clean-source smoke、497 partitions、獨立 input verify與正式排名仍未完成，因此目前沒有新的 S1 績效或可部署結論**。完成一項就在本文件打勾並填結果與 bundle 連結。
+狀態（2026-09-01 修訂）：**S0與S0.5完整完成；cost-aware S1 七組、absolute frozen exit、20M chronological cap、B6 retry、成本 ledger、SSD2／NAS input contract、8/13 common-horizon valuation、Future headroom／exit pre-fill risk guard、fail-closed publication gate與source-bound verification receipt均已完成程式接線，完整S1回歸365項通過。clean-source smoke、497 partitions、獨立 input verify與正式排名仍未完成，因此目前沒有新的 S1 績效或可部署結論**。完成一項就在本文件打勾並填結果與 bundle 連結。
 
 ## 研究定位（使用者定義）
 
@@ -63,6 +63,8 @@
 
 合法 book 固定為：使用完整 normalized raw-state machine；非 TrialMatch，TrialMatch 後須等新的 formal book 才重開 gate；bid／ask 有正價格與正數量且 `bid <= ask`；reference price 為正，executable BBO 與實際掃到的 levels 均嚴格位於 `(0.91 × ref, 1.08 × ref)`；Best／L1 同價取最大量、不相加；L1–L5 足以完成 requested hedge quantity。Book age 記錄但不作主版 hard gate。
 
+S1 normal exit另加一個fill前的邊界guard：除了當下Future buy L1–L5足量，最差swept ask上方還必須保留至少一個嚴格位於合法band內的Future tick；否則撤回Spot Ask desired並送cancel。這不修改B6的fill後execution規則，也不是Future流動性預留。它只修正2354／GCFE6已辨識的upper-band邊界風險，不保證零leg risk；actual cancel effect前的fill仍成立，真正unresolved仍fail closed。
+
 每筆至少保存：
 
 - `hedge_trigger_time_ns`、`hedge_target_time_ns = t0`
@@ -102,7 +104,7 @@
 - `transaction_costs.py` 要拆出 per-executed-leg primitives；每次 fill／hedge／rollback／forced leg 都寫 append-only ledger：`market / side / qty / price / signed_cashflow / commission / tax / execution_date / inventory_lot_id / acquisition_date`。Spot sell tax 依被解除 lot 的 acquisition date 判 15／30 bp；exit rollback 買回的 spot 是新 lot、以 rollback date 作 acquisition date。Terminal realized net 由逐腿 ledger 重建並歸 terminal Date；未解除的單腿只報 executed cashflow、inventory 與 mark／risk，不混入 realized net。
 - 依使用者指定，真正留到 stock-futures expiry 的少量 **paired** residual 採 `expiry_basis_zero_accounting`：用 expiry 日現貨收盤價同時標現貨與期貨，令 terminal basis=0。它是 accounting convention，不生成交易 request／fill／slippage、不算 executable same-day completion；另報 position count、notional 與使用此 convention 的 PnL。Naked／unresolved 單腿不得用此規則洗成 paired flat。
 - 13:00 停新倉；spot entry working orders 約 12:59:58 起停止 new 並分散 drain，不能假設 13:00 同秒無限量撤單。
-- S1 normal exit的absolute Spot Ask target不重定價，但被動單只有在Spot maker book合法且Future buy L1-L5能完整買足該position時才可維持desired quantity；Spot或Future任一book狀態改變都喚醒重驗。Future gate關閉只撤回desired／送cancel，恢復後仍只能回到原凍結價。這是pre-fill risk guard，不是Future流動性預留，也不取代實際Spot fill後獨立執行的B6。
+- S1 normal exit的absolute Spot Ask target不重定價，但被動單只有在Spot maker book合法、Future buy L1-L5能完整買足該position，且最差swept ask上方仍有至少一個合法Future tick時才可維持desired quantity；Spot或Future任一book狀態改變都喚醒重驗。Future gate關閉只撤回desired／送cancel，恢復後仍只能回到原凍結價。這是pre-fill risk guard，不是Future流動性預留，也不取代實際Spot fill後獨立執行的B6。
 - 13:19:45固定開始drain所有S1 passive exit；到13:19:49.950最晚安全成交barrier時，所有exit maker new／working／cancel lifecycle必須已terminal，否則partition fail closed。Actual cancel effect前或同cursor的真實fill仍先於cancel並照B6處理。這是S1尾端風險guard，不是S4的taker+taker hard flatten，也不保證市場同步消失時永無裸腿；任何最終`exit_rollback_failed_unresolved`仍保留容量並封鎖排名，不得用common-horizon mark或expiry basis=0洗平。
 
 本文的 venue token 只表示「該市場在該時點剩餘的一個送單 request 額度」，不是商品 token、部位或資金。實作與報表改稱**現貨送單額度**／**期貨送單額度**：以實際送出 timestamp 驗證任意 rolling interval `(t−1s, t]`，spot 最多 100 requests、future 最多 5 requests。優先序固定為 exposed-risk request（emergency rollback → entry／exit hedge → aggressive first leg）→ cancel → new；同級依原始 request cursor、再依穩定 ID FIFO，cutoff drain 的 cancel 再依最積極價格優先。Book／depth 尚不合法的 hedge不進 send-eligible queue，也不 head-of-line block其他已合法 hedge；一旦合法仍須在 dispatch cursor重驗 book，合法者才按上述 FIFO 競爭該市場送單額度。Hedge 在 deadline 前不因暫時沒有額度而 drop；deadline inclusive dispatch後依 B6 原子式 expire／rollback。Cancel intent保留到實際送出或 order terminal，若 terminal使其失效須記 `cancel_not_needed`；已指派 actual send cursor者仍計 request。尚未送出的同 order new intent只保留最新 desired state，已過 nominal stop就不再補送。容量不足的 new可留在 intent queue到 nominal stop，實際送出前才做 C9 reservation；始終未送者標 `cap_blocked`而非 fill rejection。Forced flatten另有 per-position cancel barrier：相關 passive leaves尚未 `actual_cancelled / session_expired`前，其 dependent first leg不是 send-eligible；risk-transition cancel必須先送，期間發生的 maker fills先重算 residual。若送單額度讓 hedge 晚於 `t0`，延遲納入 B6 的 5 秒總窗與 `hedge_retry_delay_ms`，不得另開一個不計價的時鐘。
@@ -205,11 +207,12 @@ S1 前 handoff：
 - [x] 七組 scenario spec、D-safe lookup provenance、explicit unsupported rows與 deterministic common-population hash 已實作。
 - [x] 每筆 position 保存`actual_new_send_time`凍結的 absolute Spot Ask exit price／tick；後續 Future Ask不得重設target price，但若hedge side失去合法足量depth，必須撤回desired／送cancel，恢復後仍只可回原凍結價。
 - [x] B6完整 raw-state retry、venue request scheduler、timeout／rollback與逐次 risk audit 已實作。
-- [x] Normal exit pre-fill gate已要求當下Future buy全量可執行，Spot／Future兩venue book change都會喚醒reconciliation；actual fill仍獨立走B6。
+- [x] Normal exit pre-fill gate已要求當下Future buy全量可執行，且最差swept ask上方至少保留一個合法Future tick；Spot／Future兩venue book change都會喚醒reconciliation，actual fill仍獨立走B6。
+- [x] `944c0ac` smoke的2354／GCFE6已精確重播：Spot exit fill前Future 57.6雖足量且仍合法，但已是strict upper band下最後一個tick；fill後57.7越界，+50 ms hedge與rollback timeout。修正只針對這個可辨識邊界，不宣稱消除所有leg risk；完整事件鏈見[`S1_PAUSE_STATUS_20260901.md`](quote_fill/S1_PAUSE_STATUS_20260901.md)。
 - [x] 13:19:45 deterministic exit drain與13:19:49.950 terminal barrier已實作；同cursor fill先於cancel，任何真正naked unresolved仍fail closed。
 - [x] 20M global／10M product pre-send reservation、共同 chronological loop、physical `raw_order_fact_id`／policy alias與 capacity verifier 已實作。
 - [x] 2026-08-13 common-horizon open valuation及與 publication/ranking接線完成並通過測試；完整facts決定final open，book價格凍結於13:20，同scenario／商品先聚合數量再掃depth，缺合法足量book即fail closed。
-- [ ] 比較表至少含：candidates、supported denominator、`entry_fill_truth`、target 位於 inside-spread／not-passive、B1、B2、B3–5、deeper／invalid 的 product-seconds、fill／actual-cancel／session-expiry／unknown、submit-to-fill p50/p95、venue request peak、hedge pricing/reference coverage、on-time／delayed／timeout／rollback outcome、delay與 slip p50/p95、同日／跨日／expiry／unresolved、20M-admitted priced net bp與coverage、reservation attempts／cap-blocked／sent／unfilled-cancelled／maker-filled、exit desired withdrawal reasons（至少`gate:future_*`／`safety_cutoff`）、cutoff／barrier sessions、日均新 spot、各 committed peak、未平與 naked notional、**20M screen日均 net、`approx_screen_completion_rate_20m`**。
+- [ ] 比較表至少含：candidates、supported denominator、`entry_fill_truth`、target 位於 inside-spread／not-passive、B1、B2、B3–5、deeper／invalid 的 product-seconds、fill／actual-cancel／session-expiry／unknown、submit-to-fill p50/p95、venue request peak、hedge pricing/reference coverage、on-time／delayed／timeout／rollback outcome、delay與 slip p50/p95、同日／跨日／expiry／unresolved、20M-admitted priced net bp與coverage、reservation attempts／cap-blocked／sent／unfilled-cancelled／maker-filled、exit desired withdrawal reasons（至少`gate:future_upper_band_headroom_lt_1_tick`／其他`gate:future_*`／`safety_cutoff`）、cutoff／barrier sessions、日均新 spot、各 committed peak、未平與 naked notional、**20M screen日均 net、`approx_screen_completion_rate_20m`**。
 - [ ] 月表同時提供 entry-cohort May／Jun／Jul／Aug（Aug 只到 08-13）與 cashflow-calendar 月份。
 - [ ] 依 frozen shortlist 規則輸出兩位 champion 與完整 7 組排序／Pareto 表。
 - [ ] 以 clean source commit 完成單 partition smoke。

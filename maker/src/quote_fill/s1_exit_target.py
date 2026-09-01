@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from .layered import EventCursor
 from .s1_hedge import CausalBookState, executable_book
@@ -13,10 +13,12 @@ from .targets import (
     effective_basis_bp,
     is_passive_target,
     price_in_ref_band,
+    price_to_tick_index,
 )
 
 ROUTE = "spot_ask_future_taker"
 PRICE_EPSILON = 1e-8
+FUTURE_BUY_HEADROOM_TICKS: Final = 1
 
 ExitTargetLocation = Literal[
     "not_passive",
@@ -128,6 +130,15 @@ def build_s1_spot_ask_target(
         )
         if future_exec is None:
             future_reason = f"future_{raw_future_reason or 'not_executable'}"
+        elif (
+            _future_buy_upper_band_headroom_ticks(
+                date=date,
+                state=future_book,
+                levels_swept=future_exec.levels_swept,
+            )
+            < FUTURE_BUY_HEADROOM_TICKS
+        ):
+            future_reason = "future_upper_band_headroom_lt_1_tick"
 
     effective_basis = (
         None
@@ -223,6 +234,35 @@ def _spot_book_reason(
     ):
         return "spot_bbo_outside_reference_band"
     return None
+
+
+def _future_buy_upper_band_headroom_ticks(
+    *,
+    date: str,
+    state: CausalBookState,
+    levels_swept: int,
+) -> int:
+    """Return full legal ticks above the worst Future-buy swept level."""
+
+    reference = state.reference_price
+    assert reference is not None
+    if levels_swept <= 0 or levels_swept > len(state.asks):
+        raise RuntimeError("future executable depth has invalid levels_swept")
+    upper_tick = price_to_tick_index(
+        float(reference) * 1.08,
+        market="future",
+        session_date=date,
+    )
+    # Prices must be strictly below 1.08 * reference.  This formula returns
+    # the last legal whole tick whether the boundary itself is on or between
+    # ticks, without weakening the strict band through floating-point noise.
+    last_legal_tick = math.ceil(upper_tick - 1e-10) - 1
+    worst_swept_tick = absolute_price_tick(
+        state.asks[levels_swept - 1].price,
+        market="future",
+        session_date=date,
+    )
+    return last_legal_tick - worst_swept_tick
 
 
 def _locate_target(

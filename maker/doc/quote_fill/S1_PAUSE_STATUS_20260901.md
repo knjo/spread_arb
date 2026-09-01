@@ -12,7 +12,7 @@
 
 - 七組 cost-aware policy、交易成本 gate、20M 全域／10M 單商品 cap、B6 hedge 定價、凍結 exit 目標、共同時點未平倉估值與 publication gate 已實作。
 - Spot 與 makerFill 的來源可依 storage contract 轉到 SSD2；個股期貨維持 NAS 並禁止用 TXF 替代。
-- 當時全套 S1 測試 359 項、路徑 contract 測試 19 項通過；Ruff、compileall 與 diff check 通過。
+- Headroom guard修正後全套S1測試365項、路徑contract測試19項通過；新clean-source commit仍須在smoke前重跑完整preflight。
 - nested repository 在啟動 smoke 前為乾淨狀態。
 
 ## 單 partition smoke 結果
@@ -41,12 +41,21 @@ reason=exit_rollback_failed_unresolved
 
 ## 後續診斷與修正
 
-精確重播顯示這不是尾盤deadline壓縮。2026-05-05的2354／GCFE6在約09:52同步漲停無賣盤：Future Ask於09:52:29.067229先消失；Spot Ask約09:52:29.138670消失，同一recv timestamp有58.5元、61與46 lots兩筆實體成交。舊normal-exit target雖計算Future executable VWAP，卻未以Future完整可買depth關閉gate，且exit wake只監聽Spot；因此Future已先失去Ask，被動Spot Ask仍可成交。後續Future hedge與Spot rollback都沒有合法Ask，形成真實可達的`exit_rollback_failed_unresolved`。
+精確重播顯示這不是尾盤deadline壓縮，也不是送單額度造成。2026-05-05的2354／GCFE6，Spot exit maker在台北時間
+09:44:14.660494（raw UTC 01:44）以57.2成交。Fill前最後一個causal Future book是09:44:14.656167780，Ask 57.6，
+只早約4.326714 ms；Future reference是53.4，strict upper為`price < 57.672`，所以57.6是最後一個合法tick，當下雖有
+足量depth，卻已沒有再承受一個向上tick的合法空間。Fill後09:44:14.661496701，Future Ask才轉為57.7並因超出band而
+不合法。Cancel在fill+1 ns才送出，quota不是延後原因；既有phase因此正確保留該fill，接著+50 ms Future hedge與後續
+Spot rollback都timeout，形成`exit_rollback_failed_unresolved`。
+
+先前的初步事件歸因不正確；以上述逐cursor重播為準。這個事件也證明只要求fill前當下Future全量可執行仍不夠：
+最後合法tick可以在數毫秒後越界，而同cursor／較晚cancel不能回頭刪除已發生的maker fill。
 
 承接修正有三層：
 
-1. Passive Spot exit須同時通過當下Future buy全量可執行gate；Spot與Future book change都會喚醒重驗。Gate只決定固定價掛單是否可工作，不會重定價，也不取代fill後B6。
+1. Passive Spot exit除須通過當下Future buy全量可執行gate，最差swept ask上方還須保留至少一個合法Future tick；Spot與Future book change都會喚醒重驗。Gate只決定固定價掛單是否可工作，不會重定價，也不取代fill後B6。
 2. 13:19:45固定開始drain所有passive exit；到13:19:49.950最晚安全成交barrier仍有new／working／cancel未terminal時，partition直接fail closed。Actual cancel effect前或同cursor的fill仍照真實phase先成交。
 3. 任何最後仍是裸腿的position繼續保留exposure與capacity並封鎖排名；不能用common-horizon mark、最後合法book或expiry basis=0補平。
 
-這些guard修掉2354揭露的可因果避免風險窗，但不宣稱同步book消失、cancel latency或實盤reject下絕不會裸腿。下一步是用新clean source commit重跑單partition smoke；通過後才啟動完整497 partitions。
+這些guard只修正2354揭露的可辨識上緣邊界風險，不宣稱同步book消失、cancel latency或實盤reject下絕不會裸腿；
+任何unresolved仍維持fail closed。下一步是用新clean source commit重跑單partition smoke；通過後才啟動完整497 partitions。

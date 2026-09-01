@@ -94,6 +94,7 @@ from .s1_event_loop import (
     encode_s1_carry_contract_binding,
     encode_s1_carry_position,
 )
+from .s1_exit_target import FUTURE_BUY_HEADROOM_TICKS
 from .s1_hedge import HEDGE_DELAY_NS, HEDGE_RETRY_NS
 from .s1_open_position_valuation import (
     COMMON_HORIZON_ASOF_ID,
@@ -138,19 +139,19 @@ from .s1_scenario_spec import (
 from .transaction_costs import TransactionCostProfile
 
 PRODUCTION_RUNNER_VERSION: Final = (
-    "s1_spot_bid_cost_aware_71x7_v6_exit_risk_guard"
+    "s1_spot_bid_cost_aware_71x7_v7_exit_headroom_guard"
 )
 RUN_CONFIG_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_run_config_v5_exit_risk_guard"
+    "s1_spot_bid_run_config_v6_exit_headroom_guard"
 )
 FINAL_BUNDLE_SCHEMA_VERSION: Final = (
-    "s1_spot_bid_complete_v5_exit_risk_guard"
+    "s1_spot_bid_complete_v6_exit_headroom_guard"
 )
-RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v5_exit_risk_guard"
+RESULTS_SCHEMA_VERSION: Final = "s1_spot_bid_results_v6_exit_headroom_guard"
 DAILY_METRICS_SCHEMA_VERSION: Final = "s1_spot_bid_daily_v2_cost_aware"
 COMMON_POPULATION_SCHEMA_VERSION: Final = "s1_common_population_date_value_quote_tod_v1"
 VERIFICATION_SCHEMA_VERSION: Final = "s1_production_verification_v2_source_bound"
-VERIFIER_VERSION: Final = "s1_production_deep_verifier_v3_exit_risk_guard"
+VERIFIER_VERSION: Final = "s1_production_deep_verifier_v4_exit_headroom_guard"
 VERIFICATION_FILENAME: Final = "verification.json"
 ROUTE_ID: Final = "spot_bid_future_taker__spot_ask_future_taker_exit"
 ENTRY_FILL_TRUTH: Final = "approximate"
@@ -160,13 +161,13 @@ DEFAULT_OUTPUT_ROOT: Final = (
     MAKER_ROOT
     / "data"
     / "walkforward"
-    / "s1_spot_bid_cost_aware_20260901_v2_exit_risk_guard"
+    / "s1_spot_bid_cost_aware_20260901_v3_exit_headroom_guard"
 )
 DEFAULT_REPORT_PATH: Final = (
     MAKER_ROOT
     / "doc"
     / "quote_fill"
-    / "POLICY_COMPARISON_SPOT_BID_20260901_V2_EXIT_RISK_GUARD.md"
+    / "POLICY_COMPARISON_SPOT_BID_20260901_V3_EXIT_HEADROOM_GUARD.md"
 )
 CAPACITY_REGISTRY_FILENAME: Final = "capacity_identity_registry.sqlite"
 GENESIS_PARTITION_SHA256: Final = hashlib.sha256(
@@ -408,6 +409,7 @@ def _semantic_run_config(
             "hedge_side": "buy",
             "quantity": "one_position_future_contracts",
             "wake_venues": ["spot", "future"],
+            "future_buy_upper_band_headroom_ticks": FUTURE_BUY_HEADROOM_TICKS,
             "semantics": (
                 "passive_spot_exit_requires_current_causal_full_depth_future_buy;"
                 "actual_fill_still_uses_independent_t0_plus_retry_b6"
