@@ -13,8 +13,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-OUT_DIR = PROJECT_ROOT / "data" / "stockfuture"
+from data_paths import STOCKFUTURE_DIR as OUT_DIR
 DEFAULT_TRADES = (
     OUT_DIR / "backtest_trades_20260126_20260629_ref9_symbol_open_base_plus_volume10_fee38p0bp.parquet"
 )

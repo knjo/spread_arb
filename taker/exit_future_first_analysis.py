@@ -23,8 +23,7 @@ import polars as pl
 import arbitrage_analysis as arb
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-OUT_DIR = PROJECT_ROOT / "data" / "stockfuture"
+from data_paths import STOCKFUTURE_DIR as OUT_DIR
 DEFAULT_EVENTS = OUT_DIR / "exit_convergence_30ms_events_20260126_20260629.parquet"
 
 

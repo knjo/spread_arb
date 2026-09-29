@@ -18,7 +18,7 @@ import sys
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sdk_core import TwTicks  # noqa: E402
+from data_paths import scan_futures_ticks  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out")
 
@@ -31,8 +31,7 @@ def main():
     ymd, qc, thr = sys.argv[1], sys.argv[2], float(sys.argv[3])
 
     # ── (1) 量級複驗：當天該合約市場總成交口數 ──
-    tw = TwTicks()
-    fut = tw.get_stock_futures_only(date=int(ymd)).filter(pl.col("QuoteCode") == qc)
+    fut = scan_futures_ticks(ymd, [qc]).collect()
     if fut.height == 0:
         print(f"⚠️ {ymd} 撈不到 {qc} 的期貨 ticks")
         return

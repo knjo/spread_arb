@@ -9,6 +9,13 @@ approximate makerFill → +50 ms hedge → terminal path → inventory cap 回�
 
 | 文件 | 內容 | 狀態 |
 |---|---|---|
+| [EVENT_S2_Q_PROFIT_20260914.md](EVENT_S2_Q_PROFIT_20260914.md) | 現行 Q、S2 hedge 完成立即補單、真實 S1＋S2 收益與週轉 | 完整 86 日期及全部核驗完成；暖機後基本／增額組日均 +10,599／+11,678 元，實際峰值 28.32M／33.64M；週轉與 52／13 日來源分段另列 |
+| [S2_ENTRY_REASSESSMENT_20260914.md](S2_ENTRY_REASSESSMENT_20260914.md) | S2 市場供給、事件觸發、60 秒冷卻、深度與門檻分解 | 重查完成；四日 25bp／深度 5 供給 129→463.5 筆／日，45,267 筆原始成交核對；不是完整投組收益 |
+| [TARGET30_Q_RESEARCH_20260911.md](TARGET30_Q_RESEARCH_20260911.md) | 30% 目標、前日 Q／持有時間、共享掛單與歷史釋放增額 | 九組全期核驗及比較完成；保留原 S2 60 秒 CD，立即補單結果見 EVENT_S2 報告 |
+| [EV_EXECUTION_COST_REVIEW_20260909.md](EV_EXECUTION_COST_REVIEW_20260909.md) | XC 統整、全腳現金成本與 Q 表核對、第一順位成本 EV 重跑 | 85 資料日全期核驗完成；全策略 +3,919／+5,118／+8,742 元／日，最佳扣假設 2% 資金成本後 +7,939；非未見資料驗證 |
+| [EV_LOOKUP_XC_20260909.md](EV_LOOKUP_XC_20260909.md) | Fable side 全腳衰減入 EV、事件維護／到期實驗 | 原始統整；S2 可往後排，不符合目前第一順位限制 |
+| [EV_LOOKUP_V22_LIQUIDITY_20260909.md](EV_LOOKUP_V22_LIQUIDITY_20260909.md) | S2 第一順位、A1 深度／50% 一 tick 成本、20M 四組比較 | 85 資料日回放與獨立核驗完成；最佳組全策略 +3,919.50 元／日（未扣資金成本） |
+| [EV_LOOKUP_V21_20260909.md](EV_LOOKUP_V21_20260909.md) | 獨立 EV 研究：當沖／一般隔夜／真正到期分支、S2 逐行情撤掛、20M 六組對照 | 六組全期回放與獨立核驗完成；45 項回歸通過 |
 | [REPLAY_SAMPLING.md](REPLAY_SAMPLING.md) | SpreadPair epoch、多層存續掛單、同價去重與撤單口徑 | 契約，已凍結 |
 | [PILOT_RESULTS.md](PILOT_RESULTS.md) | 八日／四商品 raw fill、partial、50 ms hedge 與 latent exit；含舊 60-session checkpoint 段落 | 八日 pilot 有效；60-session 段落資料已刪 |
 | [LIQUIDITY_SCREEN.md](LIQUIDITY_SCREEN.md) | 131 日 route liquidity、D-safe daily facts | 基礎事實，被 selector 讀 |

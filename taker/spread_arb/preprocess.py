@@ -9,6 +9,11 @@ import polars as pl
 
 from .contract import near_month_code
 
+try:  # 本地資料來源（SSD2 現貨 / NAS 股期）；由 taker/ 目錄執行時可匯入
+    import data_paths as _dp
+except ImportError:  # pragma: no cover - 只在非 taker 目錄執行時發生
+    _dp = None
+
 # 價格還原 scale（df 無 DecimalLocator 欄，分析端用常數，METHODOLOGY.md 步驟 1）
 SPOT_SCALE = 10000   # 現貨 ÷10000
 FUT_SCALE = 100      # 股期 ÷100
@@ -37,8 +42,10 @@ def _drop_trial_match(df: pl.DataFrame) -> pl.DataFrame:
 
 def _restore_prices(df: pl.DataFrame, scale: int) -> pl.DataFrame:
     """把放大整數的價格欄全部 ÷scale 還原成真實價（元，float）。
-    只轉 df 裡存在的價格欄，避免欄位缺漏時報錯。"""
-    cols = [c for c in PRICE_COLS if c in df.columns]
+    只轉 df 裡存在且仍是整數的價格欄（SSD2 現貨檔已是 float 真實價，不可再除）。"""
+    cols = [c for c in PRICE_COLS if c in df.columns and not df.schema[c].is_float()]
+    if not cols:
+        return df
     return df.with_columns([(pl.col(c) / scale).alias(c) for c in cols])
 
 
@@ -117,10 +124,18 @@ def _clean(df: pl.DataFrame, scale: int) -> pl.DataFrame:
     df = _drop_trial_match(df)
     df = _restore_prices(df, scale)
     df = _mark_quote_fill(df)
-    # 時間軸統一：TIME_COL(RecvTime, UTC) → 台北時間(naive)，輸出時間才不會差 8 小時
-    df = df.with_columns(
-        pl.col(TIME_COL).dt.convert_time_zone("Asia/Taipei").dt.replace_time_zone(None)
-    )
+    # 時間軸統一：TIME_COL(RecvTime, UTC) → 台北時間(naive)，輸出時間才不會差 8 小時。
+    # NAS 期貨為 tz-aware、SSD2 現貨為 naive UTC，兩種都處理。
+    if df.schema[TIME_COL].time_zone is not None:
+        df = df.with_columns(
+            pl.col(TIME_COL).dt.convert_time_zone("Asia/Taipei").dt.replace_time_zone(None)
+        )
+    else:
+        df = df.with_columns(
+            pl.col(TIME_COL).dt.replace_time_zone("UTC").dt.convert_time_zone("Asia/Taipei")
+              .dt.replace_time_zone(None)
+        )
+    df = df.with_columns(pl.col(TIME_COL).cast(pl.Datetime("us")))
     # 用 dt.time() 直接比，不可用 hour()*60+minute()：dt.hour() 回 Int8，
     # ×60 不升型會無聲溢位(780→12)，導致過濾完全失效（實際踩過）
     return df.filter(pl.col(TIME_COL).dt.time() < pl.time(*SESSION_CUTOFF))
@@ -133,17 +148,33 @@ def _load_kw(date, code) -> dict:
     return kw
 
 
+def _code_list(code) -> list[str] | None:
+    if code is None:
+        return None
+    return [code] if isinstance(code, str) else list(code)
+
+
 def load_spot(tw, date, code=None) -> pl.DataFrame:
-    """讀現貨 ticks 並還原價格（÷10000）。date 原樣傳給 SDK。
-    code：股票代號(str|list)，撈時就過濾；不傳=全天全商品。"""
-    df = tw.get_stock_round_only(**_load_kw(date, code))
+    """讀現貨 ticks 並還原價格。tw=None → 讀 SSD2 {date}_StockTick.parquet（預設）；
+    tw 給 sdk_core.TwTicks 則走舊 NAS SDK。code：股票代號(str|list)，不傳=全市場。"""
+    if tw is None:
+        if _dp is None:
+            raise RuntimeError("data_paths 不可匯入：請從 taker/ 目錄執行")
+        df = _dp.scan_spot_ticks(str(date), _code_list(code)).collect()
+    else:
+        df = tw.get_stock_round_only(**_load_kw(date, code))
     return _clean(df, SPOT_SCALE)
 
 
 def load_futures(tw, date, code=None) -> pl.DataFrame:
-    """讀股期 ticks 並還原價格（÷100）。date 原樣傳給 SDK。
-    code：股期合約代號(str|list，如 CCFF6)，撈時就過濾；不傳=全天全商品。"""
-    df = tw.get_stock_futures_only(**_load_kw(date, code))
+    """讀股期 ticks 並還原價格（÷100）。tw=None → 讀 NAS YYYY/MM/DD/stock_futures.parquet；
+    code：股期合約代號(str|list，如 CCFF6)，不傳=全部合約。"""
+    if tw is None:
+        if _dp is None:
+            raise RuntimeError("data_paths 不可匯入：請從 taker/ 目錄執行")
+        df = _dp.scan_futures_ticks(str(date), _code_list(code)).collect()
+    else:
+        df = tw.get_stock_futures_only(**_load_kw(date, code))
     return _clean(df, FUT_SCALE)
 
 

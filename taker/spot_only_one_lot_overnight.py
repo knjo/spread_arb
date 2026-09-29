@@ -17,10 +17,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = PROJECT_ROOT / "data" / "stockfuture"
-MARKET_DIR = PROJECT_ROOT / "data" / "marketData"
-PLOT_DIR = DATA_DIR / "plots"
+from data_paths import MARKET_DIR, PLOT_DIR, STOCKFUTURE_DIR as DATA_DIR
 
 START = "20260126"
 END = "20260629"

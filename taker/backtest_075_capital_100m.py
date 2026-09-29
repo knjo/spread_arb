@@ -8,10 +8,7 @@ import numpy as np
 import polars as pl
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = PROJECT_ROOT / "data" / "stockfuture"
-PLOT_DIR = DATA_DIR / "plots"
-MARKET_DIR = PROJECT_ROOT / "data" / "marketData"
+from data_paths import MARKET_DIR, PLOT_DIR, STOCKFUTURE_DIR as DATA_DIR
 
 START = "20260126"
 END = "20260629"

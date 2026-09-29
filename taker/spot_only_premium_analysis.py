@@ -19,9 +19,7 @@ import polars as pl
 from spread_arb.contract import settlement_date, to_date
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = PROJECT_ROOT / "data" / "stockfuture"
-MARKET_DIR = PROJECT_ROOT / "data" / "marketData"
+from data_paths import MARKET_DIR, STOCKFUTURE_DIR as DATA_DIR
 START = "20260126"
 END = "20260629"
 CONTRACT_SIZE = 2000

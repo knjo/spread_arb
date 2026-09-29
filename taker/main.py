@@ -31,8 +31,7 @@ def timed(label: str):
     yield
     print(f"    [{label}] {time.perf_counter() - t0:.1f}s")
 
-from sdk_core import TwTicks, TwMarketData
-from mysql import StrategyMySQLLoader
+from data_paths import is_trade_day
 from spread_arb.contract import near_month_code, settlement_date
 from spread_arb.preprocess import (
     load_spot, load_futures, filter_near_month, to_minute_bars,
@@ -118,7 +117,7 @@ def day_events_base(tw, tw_md, mysql, cal_date, code=None, fut_code=None,
     use_ticks=True 時跳過壓1分K，逐 tick 算（as-of backward 即上一刻現貨，不需 lag）。
     回傳含 side/threshold 的基礎事件表（無 fee/capital/roi）。"""
     ymd = cal_date.strftime("%Y%m%d")
-    with timed("撈檔(NAS)"):
+    with timed("撈檔(SSD2 現貨 / NAS 股期)"):
         try:
             spot = load_spot(tw, ymd, code=code)
             fut = filter_near_month(load_futures(tw, ymd, code=fut_code), ymd)
@@ -233,12 +232,11 @@ def main():
     end = datetime.strptime(args.end_date, "%Y%m%d") if args.end_date else start
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    tw = TwTicks()
-    tw_md = TwMarketData()
-    mysql = StrategyMySQLLoader()
+    # 資料來源改本地：tw/tw_md/mysql 皆 None → preprocess/basic_info 走 SSD2/NAS/MySQL 直連
+    tw = tw_md = mysql = None
     # 結算日假日順延（春節等）：注入交易日判斷，contract 內部有快取
     from spread_arb import contract as _contract
-    _contract.set_trade_day_fn(mysql.is_trade_day)
+    _contract.set_trade_day_fn(is_trade_day)
 
     t_all = time.perf_counter()
     prev_inv = pl.DataFrame()   # 昨日滾來的庫存（沒收斂的 fill）；庫存模式才用
@@ -247,7 +245,7 @@ def main():
         ymd = cal.strftime("%Y%m%d")
         # 先用日曆判斷交易日，非交易日直接跳過（比撈檔噴錯乾淨）
         try:
-            if not mysql.is_trade_day(ymd):
+            if not is_trade_day(ymd):
                 print(f"分析 {ymd}... 非交易日，跳過")
                 cal += timedelta(days=1)
                 continue

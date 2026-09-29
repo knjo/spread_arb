@@ -29,9 +29,23 @@ from spread_arb import contract as contract_calendar
 from spread_arb.contract import near_month_code, settlement_date
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-MARKET_DIR = PROJECT_ROOT / "data" / "marketData"
-OUT_DIR = PROJECT_ROOT / "data" / "stockfuture"
+from data_paths import (
+    HFT_ROOT,
+    MARKET_DIR,
+    STOCKFUTURE_DIR,
+    ensure_output_dir,
+    load_futures_basic as _load_futures_basic_db,
+    market_data_path,
+    normalize_recv_time,
+    scan_futures_ticks,
+    scan_spot_ticks,
+    spot_tick_path,
+)
+
+# 資料來源（2026-09-07 起）：現貨/marketData 讀 SSD2（pipeline.yaml），股期讀 NAS，
+# 中間檔與回測輸出一律放 SSD2 的 stockfuture/。其他腳本沿用 aa.OUT_DIR / aa.MARKET_DIR。
+PROJECT_ROOT = HFT_ROOT
+OUT_DIR = STOCKFUTURE_DIR
 
 SPOT_SCALE = 10000
 FUT_SCALE = 100
@@ -87,16 +101,16 @@ def _feature_path(date: str) -> Path:
 
 
 def _restore_prices(df: pl.DataFrame, scale: int) -> pl.DataFrame:
-    cols = [c for c in PRICE_COLS if c in df.columns]
+    """放大整數價 ÷scale 還原。SSD2 現貨檔價格已是 float 真實價 → 整數欄才除，float 欄不動。"""
+    cols = [c for c in PRICE_COLS if c in df.columns and not df.schema[c].is_float()]
+    if not cols:
+        return df
     return df.with_columns([(pl.col(c) / scale).alias(c) for c in cols])
 
 
 def _normalize_time(df: pl.DataFrame) -> pl.DataFrame:
-    if TIME_COL not in df.columns:
-        raise ValueError(f"missing {TIME_COL}")
-    return df.with_columns(
-        pl.col(TIME_COL).dt.convert_time_zone("Asia/Taipei").dt.replace_time_zone(None)
-    )
+    """RecvTime → 台北 naive datetime[us]（tz-aware 與 naive-UTC 兩種來源都處理）。"""
+    return normalize_recv_time(df, TIME_COL)
 
 
 def _after_0900_expr(col: str = "TransTime") -> pl.Expr:
@@ -162,34 +176,8 @@ def _add_futures_best_quotes(fut: pl.DataFrame) -> pl.DataFrame:
 
 
 def _load_futures_basic(date: str) -> pl.DataFrame:
-    """Load stock-futures product metadata without depending on python-dotenv."""
-    try:
-        from mysql import StrategyMySQLLoader
-
-        pdf = StrategyMySQLLoader().get_futures_basic_info(date=int(date))
-        return pl.from_pandas(pdf)
-    except Exception:
-        from sqlalchemy import create_engine, text
-        import pandas as pd
-
-        db_host = os.getenv("MYSQL_HOST") or "192.168.1.187"
-        db_url = f"mysql+pymysql://data.admin:automated@{db_host}:3306"
-        query = text(
-            """
-            SELECT quote_code, value_code, ref_price, contract_size,
-                   decimal_locator, end_date
-            FROM ProductInfo.taifex_pib_view
-            WHERE date = :date
-              AND prod_kind = 'stock'
-              AND ins_type = 'futures'
-            """
-        )
-        engine = create_engine(db_url, pool_pre_ping=True)
-        with engine.begin() as conn:
-            pdf = pd.read_sql(query, conn, params={"date": int(date)})
-        if pdf.empty:
-            raise RuntimeError(f"{date}: no futures basic info")
-        return pl.from_pandas(pdf)
+    """期貨基本面（MySQL taifex_pib_view）。maker 線的 contracts.py 也借用此函式。"""
+    return _load_futures_basic_db(date)
 
 
 def _join_futures_basic(fut: pl.DataFrame, date: str) -> pl.DataFrame:
@@ -219,7 +207,7 @@ def _join_futures_basic(fut: pl.DataFrame, date: str) -> pl.DataFrame:
 
 
 def _load_market_tradable(date: str) -> pl.DataFrame:
-    path = MARKET_DIR / f"{date}_marketData.parquet"
+    path = market_data_path(date)
     if not path.exists():
         raise FileNotFoundError(f"marketData not found: {path}")
     df = pl.read_parquet(path)
@@ -243,16 +231,14 @@ def _load_market_tradable(date: str) -> pl.DataFrame:
 
 
 def _fetch_futures(date: str, fut_codes: list[str] | None, force: bool) -> Path:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    """近月標準合約股期 ticks 快取：NAS 全月份檔 → 過濾近月/標準 → 存 SSD2 stockfuture/。"""
+    ensure_output_dir(OUT_DIR)
     path = _raw_future_path(date)
     if path.exists() and not force:
         return path
-    from sdk_core import TwTicks
-
-    tw = TwTicks()
-    df = tw.get_stock_futures_only(date=int(date), code=fut_codes)
+    df = scan_futures_ticks(date, fut_codes).collect()
     if df.height == 0:
-        raise RuntimeError(f"{date}: no stock-futures ticks fetched")
+        raise RuntimeError(f"{date}: no stock-futures ticks on NAS")
     df = _join_futures_basic(df, date)
     near = near_month_code(date)
     df = df.filter(
@@ -267,23 +253,15 @@ def _fetch_futures(date: str, fut_codes: list[str] | None, force: bool) -> Path:
 
 
 def _fetch_spot(date: str, codes: list[str], force: bool) -> Path:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = _raw_spot_path(date)
-    if path.exists() and not force:
-        return path
-    from sdk_core import TwTicks
-
-    tw = TwTicks()
-    df = tw.get_stock_round_only(date=int(date), code=codes)
-    if df.height == 0:
-        raise RuntimeError(f"{date}: no spot ticks fetched for {len(codes)} codes")
-    df.write_parquet(path)
-    return path
+    """現貨不再另存快取：直接回 SSD2 的 {date}_StockTick.parquet（讀時以 codes 過濾）。"""
+    return spot_tick_path(date)
 
 
 def _load_spot_raw(date: str, codes: list[str], force_fetch: bool) -> pl.DataFrame:
-    path = _fetch_spot(date, codes, force_fetch)
-    spot = _restore_prices(_normalize_time(pl.read_parquet(path)), SPOT_SCALE)
+    spot = scan_spot_ticks(date, codes).collect()
+    if spot.height == 0:
+        raise RuntimeError(f"{date}: no spot ticks on SSD2 for {len(codes)} codes")
+    spot = _restore_prices(_normalize_time(spot), SPOT_SCALE)
     spot = spot.filter(_session_time_expr(TIME_COL))
     if "TransTime" in spot.columns:
         spot = spot.filter(_session_time_expr("TransTime"))

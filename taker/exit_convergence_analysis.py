@@ -18,9 +18,7 @@ import polars as pl
 import arbitrage_analysis as arb
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-OUT_DIR = PROJECT_ROOT / "data" / "stockfuture"
-PLOT_DIR = OUT_DIR / "plots"
+from data_paths import PLOT_DIR, STOCKFUTURE_DIR as OUT_DIR
 THRESHOLDS = [0.005, 0.0075, 0.01, 0.0125]
 
 

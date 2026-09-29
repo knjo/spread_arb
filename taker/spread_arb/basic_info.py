@@ -11,14 +11,21 @@ from __future__ import annotations
 
 import polars as pl
 
+try:
+    import data_paths as _dp
+except ImportError:  # pragma: no cover
+    _dp = None
+
 # 現貨基本面要帶進 ticks 的欄位（quote_code 是對齊鍵）
 _SPOT_KEEP = ["quote_code", "opening_ref_price", "allow_day_trade_mark"]
 
 
 def load_stock_basic(tw_md, date) -> pl.DataFrame:
-    """讀現貨個股基本面（pandas → polars），只留要用的欄位。"""
-    pdf = tw_md.get_equity_basic_info(date=date, ins_type="stock")
-    df = pl.from_pandas(pdf)
+    """讀現貨個股基本面，只留要用的欄位。tw_md=None → SSD2 marketData parquet。"""
+    if tw_md is None:
+        df = _dp.load_spot_basic(date)
+    else:
+        df = pl.from_pandas(tw_md.get_equity_basic_info(date=date, ins_type="stock"))
     return df.select([c for c in _SPOT_KEEP if c in df.columns])
 
 
@@ -28,8 +35,9 @@ def load_futures_basic(mysql_loader, date) -> pl.DataFrame:
     注意：view 的 ref_price 已是真實價（實測 1303 南亞=104），不可再除；
     decimal_locator 描述該商品 tick 餵價縮放（期貨=2 即÷100，對應 FUT_SCALE），
     僅為 metadata，與 ref_price 無關（曾誤除→±9%全滅→單日0事件）。"""
-    pdf = mysql_loader.get_futures_basic_info(date=date)
-    return pl.from_pandas(pdf)
+    if mysql_loader is None:
+        return _dp.load_futures_basic(date)
+    return pl.from_pandas(mysql_loader.get_futures_basic_info(date=date))
 
 
 def _warn_join_miss(joined: pl.DataFrame, key_col: str, check_col: str, what: str) -> None:

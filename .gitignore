@@ -14,6 +14,11 @@ maker/data/**
 !maker/data/README.md
 !maker/doc/**/*.md
 !maker/src/**/*.md
+!spreadArb/README.md
+!spreadArb/doc/**/*.md
+!spreadArb/src/**/*.md
+spreadArb/data/**
+!spreadArb/data/README.md
 
 # ── 機密 ──
 .env                    # MySQL / SDK 帳密

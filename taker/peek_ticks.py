@@ -26,7 +26,6 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from datetime import timedelta
 import polars as pl
-from sdk_core import TwTicks
 from spread_arb.preprocess import load_spot, load_futures, filter_near_month, TIME_COL
 
 OUT_DIR = "out"
@@ -166,7 +165,7 @@ def main():
 
     start = datetime.strptime(args.start_date, "%Y%m%d")
     end = datetime.strptime(args.end_date, "%Y%m%d") if args.end_date else start
-    tw = TwTicks()   # 只建一次
+    tw = None   # None → preprocess 直接讀 SSD2 現貨 / NAS 股期
     cal = start
     while cal <= end:
         ymd = int(cal.strftime("%Y%m%d"))

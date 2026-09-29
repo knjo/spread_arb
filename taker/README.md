@@ -4,24 +4,30 @@
 
 新的日內 basis maker 研究已獨立規劃於 [`../maker/`](../maker/README.md)，不屬於本 taker 回測口徑。
 
+## 資料來源（2026-09-07 起：SSD2 / NAS，不再經 sdk_core）
+
+所有路徑集中在 `data_paths.py`，讀 HFT 根目錄 `config/pipeline.yaml` 的 `data_storage`：
+
+| 資料 | 位置 | 備註 |
+|---|---|---|
+| 現貨 ticks | `{tick_dir}/{date}_StockTick.parquet`（SSD2） | 價格已是真實價 float、RecvTime 為 naive UTC |
+| 股期 ticks | `/mnt/NAS/Parquet/Ticks/YYYY/MM/DD/stock_futures.parquet` | 放大整數 ÷100、RecvTime tz-aware UTC、含全部月份；SSD2 沒有股期 |
+| 現貨基本面 | `{market_dir}/{date}_marketData.parquet`（SSD2） | 取代 `TwMarketData.get_equity_basic_info` |
+| 期貨基本面／交易日曆 | MySQL（`taifex_pib_view`、`calendar_view`） | 直連 sqlalchemy+pymysql，不需 python-dotenv |
+| 研究輸出 | `{base_dir}/stockfuture/`（SSD2） | 原 `HFT/data/stockfuture/`；近月標準合約股期會在此快取成 `{date}_stockfuture.parquet` |
+
 ## 建議執行環境
 
-新版 tick-level 流程使用 HFT 專案環境；先從 HFT 根目錄同步：
-
 ```bash
-uv sync
-```
-
-`requirements.txt` 列出舊版低頻流程相對 HFT 主環境多出的套件；`requirements.snapshot.txt` 則保留搬移前的完整鎖版環境快照。
-
-舊版低頻流程使用相對路徑 `out/`，建議先進入本目錄再執行：
-
-```bash
+uv sync                                        # HFT 根目錄
 cd src/research/futures_spot_spread/taker
-uv run --with-requirements requirements.txt python main.py -h
+uv run python arbitrage_analysis.py features -s 20260706   # tick-level 主流程
+uv run python main.py -s 20260706 --ticks                   # 舊版低頻流程（輸出相對路徑 out/）
 ```
 
-新版 tick-level 研究會自行定位 HFT 專案根目錄，輸出放在 `data/stockfuture/`。
+`requirements.txt` / `requirements.snapshot.txt` 僅保留舊環境紀錄；現行 HFT 主環境已足夠。
+舊版 `main.py`／`peek_ticks.py`／`settle_official.py` 的 `tw`/`tw_md`/`mysql` 參數傳 `None` 即走本地來源，
+傳入 sdk_core 物件仍可走舊 SDK。
 
 ## 內容索引
 
@@ -41,6 +47,14 @@ uv run --with-requirements requirements.txt python main.py -h
 - `backtest_075_capital_100m.py`：0.75% 路徑在一億元資本限制下的縮放回測。
 - `leg_pnl_by_convergence.py`：依期貨／現貨腳及收斂狀態拆解損益。
 
+### 期貨腳 maker 掛單研究（2026-09-07 新增）
+
+- `fut_maker_quote_stability.py`：現貨仍 taker 吃 A1，期貨依期望價差反推賣價 `P* = ceil_tick(spot_ask/(1−θ))`，
+  在 `bid1 < P* < ask1` 時掛進期貨買賣價差內（隊列第一）。逐 tick 模擬每筆掛單存活到「被迫改單」
+  （現貨 A1 漲／被人掛到下面）或成交的時間，並記錄掛出當下的市況特徵，用來找「哪些情況掛了不必常改單」。
+  支援 `--policy pstar,a1m1,a1m2`（掛 P*／A1−1／A1−2）。輸出 `stockfuture/fut_maker_quote/`。
+- `FUT_MAKER_QUOTE_STABILITY_20260907.md`：上述研究 12 個樣本日的初版結果與建議閘門。
+
 ### 進場與候選標的分析
 
 - `candidate_filter_analysis.py`：候選階段 tickFeature 篩選。
@@ -53,6 +67,7 @@ uv run --with-requirements requirements.txt python main.py -h
 ### 出場、滑價與微結構
 
 - `exit_convergence_analysis.py`：價差發散後的可成交收斂分析。
+- `convergence_days_by_settle_cycle.py`：收斂天數 x 門檻 x 結算週期位置（距結算／結算後第 N 個交易日）。`build` 從 SSD2 現貨 + NAS 股期重建輕量價差流到 `stockfuture/spread_stream/`（舊 `out/events_*` 事實表已不在），`summarize` 產各分組的當日／跨日／抱到結算比例與平均收斂交易日，`crosstab` 再切結算後第 N 日 × 距結算交叉表、週期進度、相對 tick／價位檔，輸出 `stockfuture/convergence_days/`；結果見 `出場分析報告.md` 第七節（7.6 換軸、7.7 tick size）。
 - `exit_future_first_analysis.py`：先平期貨的出場執行分析。
 - `exit_tickfeature_factor_screen.py`：出場 tickFeature 因子篩選。
 - `peek_ticks.py`：擷取進出場點前後的 raw ticks。

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from sdk_core import TwTicks
+from data_paths import scan_spot_ticks
 
 SPOT_SCALE = 10000          # 現貨價 ÷10000 還原
 GRID_STEP_SECS = 5          # 5 秒網格
@@ -50,10 +50,12 @@ def load_spot_fills(tw, date, code) -> pl.DataFrame:
 
     回 [TransTime, fill_price]（已 ÷10000 還原、依 TransTime 排序）。
     """
-    raw = tw.get_stock_round_only(date=date, code=code)
+    raw = scan_spot_ticks(str(date), [code]).collect()
     if raw.height == 0:
         return pl.DataFrame(schema={"TransTime": pl.Datetime("us"), "fill_price": pl.Float64})
     df = raw
+    # SSD2 現貨檔價格已是真實價（float）；只有舊 SDK 整數價才需 ÷SPOT_SCALE
+    scale = 1 if df.schema["FillPrice"].is_float() else SPOT_SCALE
     # 只留正式撮合（TrialMatch==0），緩搓不成交、不能納入結算取樣
     if "TrialMatch" in df.columns:
         df = df.filter(pl.col("TrialMatch") == 0)
@@ -61,7 +63,7 @@ def load_spot_fills(tw, date, code) -> pl.DataFrame:
     df = df.filter((pl.col("FillPrice") > 0) & (pl.col("FillLots") > 0))
     df = df.select(
         pl.col("TransTime"),
-        (pl.col("FillPrice") / SPOT_SCALE).alias("fill_price"),
+        (pl.col("FillPrice") / scale).alias("fill_price"),
         pl.col("FillLots").alias("fill_lots"),
     ).sort("TransTime")
     return df
@@ -104,8 +106,7 @@ def main():
     args = p.parse_args()
 
     date = datetime.strptime(args.date, "%Y%m%d")
-    tw = TwTicks()
-    fills = load_spot_fills(tw, int(args.date), args.code)
+    fills = load_spot_fills(None, int(args.date), args.code)
     print(f"== {args.code} {args.date} 結算價試算 ==")
     print(f"當日成交列 {fills.height:,} 筆")
     if fills.height:

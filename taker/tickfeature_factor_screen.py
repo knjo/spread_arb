@@ -26,12 +26,13 @@ import pandas as pd
 import polars as pl
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = PROJECT_ROOT / "data"
-STOCKFUTURE_DIR = DATA_DIR / "stockfuture"
-TICK_DATA_DIR = DATA_DIR / "tickData"
-TICK_FEATURE_DIR = DATA_DIR / "tickFeature"
-PLOT_DIR = STOCKFUTURE_DIR / "plots"
+from data_paths import (
+    DATA_ROOT as DATA_DIR,
+    PLOT_DIR,
+    SPOT_TICK_DIR as TICK_DATA_DIR,
+    STOCKFUTURE_DIR,
+    TICK_FEATURE_DIR,
+)
 
 DEFAULT_TRADES = (
     STOCKFUTURE_DIR

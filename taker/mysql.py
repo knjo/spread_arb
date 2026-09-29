@@ -1,7 +1,12 @@
 from sqlalchemy import create_engine, text
 import pandas as pd
-from dotenv import load_dotenv
 import os
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # HFT 主環境未裝 python-dotenv，直接讀環境變數即可
+    def load_dotenv():
+        return False
 
 
 class BaseMySQLLoader:

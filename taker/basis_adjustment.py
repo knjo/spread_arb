@@ -20,8 +20,8 @@ import polars as pl
 import arbitrage_analysis as aa
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-OUT_DIR = PROJECT_ROOT / "data" / "stockfuture"
+from data_paths import STOCKFUTURE_DIR as OUT_DIR, scan_futures_ticks
+
 BASIS_FUT_DIR = OUT_DIR / "prev_basis_futures"
 
 
@@ -105,10 +105,8 @@ def _fetch_previous_futures_for_current_contracts(
     path = BASIS_FUT_DIR / f"{prev_date}_for_{date}_stockfuture.parquet"
     if path.exists():
         return path
-    from sdk_core import TwTicks
-
     print(f"{date}: fetch previous-day current contracts {len(quote_codes)} codes on {prev_date}")
-    raw = TwTicks().get_stock_futures_only(date=int(prev_date), code=quote_codes)
+    raw = scan_futures_ticks(prev_date, quote_codes).collect()
     if raw.height == 0:
         raw.write_parquet(path)
         return path
