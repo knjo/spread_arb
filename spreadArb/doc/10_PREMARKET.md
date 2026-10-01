@@ -1,4 +1,8 @@
-# spreadArb 盤前檔規格（Python）
+> 2026-09-29：本文件已由 [RD盤前交付與實作盤點](13_RD_PREMARKET_HANDOFF.md) 取代，只保留歷史設計。
+> 以下「以本文為準」不再適用。到期時間、scale缺值、anchor時間與有效性、B訊號去重、公司行動及額外驗證門檻有多處與採用版不同；不可直接照此實作。
+> 舊文列出的兩個盤前檔尚無正式exporter；現行交易規格見 [12_RD_TRADING_SPEC.md](12_RD_TRADING_SPEC.md)。
+
+# spreadArb 盤前檔規格（Python，歷史）
 
 > 文件目的：讓 RD 用 Python 獨立寫出「每個交易日開盤前產出當日交易所需資料」的程式。不依賴 maker 研究線的任何中間檔。
 >
